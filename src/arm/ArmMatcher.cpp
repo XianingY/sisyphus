@@ -1,6 +1,7 @@
 #include "ArmMatcher.h"
 #include "ArmOps.h"
 #include "../codegen/Attrs.h"
+#include <cstdlib>
 #include <iostream>
 
 using namespace sys;
@@ -425,6 +426,7 @@ int ArmRule::evalExpr(Expr *expr) {
 
   std::cerr << "unknown opname: " << opname << "\n";
   assert(false);
+  std::abort();
 }
 
 Op *ArmRule::buildExpr(Expr *expr) {
@@ -526,6 +528,7 @@ Op *ArmRule::buildExpr(Expr *expr) {
 
   std::cerr << "unknown opname: " << opname << "\n";
   assert(false);
+  std::abort();
 }
 
 // Nearly identical as above, just the "match" condition has changed.

@@ -4,6 +4,7 @@
 #include "Type.h"
 
 #include <cassert>
+#include <cstdlib>
 #include <iostream>
 #include <vector>
 #include <set>
@@ -377,6 +378,7 @@ Type *Sema::infer(ASTNode *node) {
 
   std::cerr << "cannot infer node " << node->getID() << "\n";
   assert(false);
+  std::abort();
 }
 
 Sema::Sema(ASTNode *node, TypeContext &ctx): ctx(ctx) {

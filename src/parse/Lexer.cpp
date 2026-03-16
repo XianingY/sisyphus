@@ -1,6 +1,7 @@
 #include "Lexer.h"
 #include <cassert>
 #include <cctype>
+#include <cstdlib>
 #include <cmath>
 #include <map>
 
@@ -203,6 +204,7 @@ Token Lexer::nextToken() {
   case '}': loc++; return Token::RBrace;
   default:
     assert(false);
+    std::abort();
   }
 }
 

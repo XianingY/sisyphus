@@ -2,6 +2,7 @@
 #define OPBASE_H
 
 #include <algorithm>
+#include <cstdlib>
 #include <iterator>
 #include <list>
 #include <iostream>
@@ -281,6 +282,7 @@ public:
       if (isa<T>(x))
         return cast<T>(x);
     assert(false);
+    std::abort();
   }
 
   template<class T>

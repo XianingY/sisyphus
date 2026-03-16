@@ -47,9 +47,10 @@ class Interpreter {
   void store(Op *op, intptr_t v);
 
   void exec(Op *op);
-  Value execf(Region *region, const std::vector<Value> &args);
+  Value execf(Region *region, const std::vector<Value> &fnArgs);
 
-  Value applyExtern(const std::string &name, const std::vector<Value> &args);
+  Value applyExtern(const std::string &name, const std::vector<Value> &callArgs);
+  size_t getAccessSize(Op *op, bool isLoad);
 
   unsigned retcode;
   int *cache = nullptr;

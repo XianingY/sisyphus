@@ -13,3 +13,11 @@ For batch compilation against a local SysY case directory:
 scripts/regression.sh /path/to/cases riscv O1
 scripts/regression.sh /path/to/cases arm O1
 ```
+
+For semantic consistency check (`--compare`) and assembly-size proxy:
+
+```bash
+scripts/compare.sh /path/to/cases riscv O1
+scripts/compare.sh /path/to/cases arm O1
+scripts/asm-delta.sh /path/to/cases riscv
+```

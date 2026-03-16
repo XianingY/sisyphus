@@ -1,12 +1,13 @@
 #include "Exec.h"
 #include "../codegen/Attrs.h"
+#include <cstdlib>
 #include <cstring>
 
 using namespace sys;
 using namespace sys::exec;
 
 #define sys_unreachable(x) \
-  do { std::cerr << x << "\n"; assert(false); } while (0)
+  do { std::cerr << x << "\n"; std::abort(); } while (0)
 
 Interpreter::Interpreter(ModuleOp *module) {
   auto region = module->getRegion();
@@ -71,6 +72,30 @@ void Interpreter::store(Op *op, intptr_t v) {
 
 void Interpreter::store(Op *op, float v) {
   value[op] = Value { .vf = v };
+}
+
+size_t Interpreter::getAccessSize(Op *op, bool isLoad) {
+  if (auto sizeAttr = op->find<SizeAttr>())
+    return sizeAttr->value;
+
+  if (isLoad) {
+    if (op->getResultType() == sys::Value::f32)
+      return 4;
+    if (op->getResultType() == sys::Value::i64)
+      return 8;
+    if (op->getResultType() == sys::Value::i128)
+      return 16;
+    return 4;
+  }
+
+  auto defTy = op->DEF(0)->getResultType();
+  if (defTy == sys::Value::f32)
+    return 4;
+  if (defTy == sys::Value::i64)
+    return 8;
+  if (defTy == sys::Value::i128)
+    return 16;
+  return 4;
 }
 
 // The registers are in fact 64-bit.
@@ -189,7 +214,7 @@ void Interpreter::exec(Op *op) {
     break;
   }
   case LoadOp::id: {
-    size_t size = SIZE(op);
+    size_t size = getAccessSize(op, /*isLoad=*/true);
     bool fp = op->getResultType() == sys::Value::f32;
     intptr_t addr = eval(op->DEF());
     if (fp)
@@ -198,12 +223,17 @@ void Interpreter::exec(Op *op) {
       store(op, (intptr_t) *(int*) addr);
     else if (size == 8)
       store(op, *(intptr_t*) addr);
+    else if (size == 16) {
+      intptr_t lower = 0;
+      memcpy(&lower, (void*) addr, sizeof(lower));
+      store(op, lower);
+    }
     else
-      assert(false);
+      sys_unreachable("unsupported load size " << size);
     break;
   }
   case StoreOp::id: {
-    size_t size = SIZE(op);
+    size_t size = getAccessSize(op, /*isLoad=*/false);
     intptr_t addr = eval(op->DEF(1));
     Op *def = op->DEF(0);
     bool fp = def->getResultType() == sys::Value::f32;
@@ -213,8 +243,12 @@ void Interpreter::exec(Op *op) {
       *(int*) addr = eval(def);
     else if (size == 8)
       *(intptr_t*) addr = eval(def);
+    else if (size == 16) {
+      auto lower = eval(def);
+      memcpy((void*) addr, &lower, sizeof(lower));
+    }
     else
-      assert(false);
+      sys_unreachable("unsupported store size " << size);
     break;
   }
   case SelectOp::id: {
@@ -227,7 +261,7 @@ void Interpreter::exec(Op *op) {
   }
 }
 
-Interpreter::Value Interpreter::applyExtern(const std::string &name, const std::vector<Value> &args) {
+Interpreter::Value Interpreter::applyExtern(const std::string &name, const std::vector<Value> &callArgs) {
   if (name == "getint") {
     int x; inbuf >> x;
     return Value { .vi = x };
@@ -244,14 +278,14 @@ Interpreter::Value Interpreter::applyExtern(const std::string &name, const std::
     int n; inbuf >> n;
     // See 03_sort1.in. They provided data that exceed range of int.
     // They're too irresponsible.
-    unsigned *ptr = (unsigned*) args[0].vi;
+    unsigned *ptr = (unsigned*) callArgs[0].vi;
     for (int i = 0; i < n; i++)
       inbuf >> ptr[i];
     return Value { .vi = n };
   }
   if (name == "getfarray") {
     int n; inbuf >> n;
-    float *ptr = (float*) args[0].vi;
+    float *ptr = (float*) callArgs[0].vi;
     std::string x;
     for (int i = 0; i < n; i++) {
       inbuf >> x;
@@ -260,22 +294,22 @@ Interpreter::Value Interpreter::applyExtern(const std::string &name, const std::
     return Value { .vi = n };
   }
   if (name == "putint") {
-    intptr_t v = args[0].vi;
+    intptr_t v = callArgs[0].vi;
     // Direct cast of `(int) v` is implementation-defined.
     outbuf << (int) (unsigned) v;
     return Value();
   }
   if (name == "putch") {
-    outbuf << (char) args[0].vi;
+    outbuf << (char) callArgs[0].vi;
     return Value();
   }
   if (name == "putfloat") {
-    outbuf << args[0].vf;
+    outbuf << callArgs[0].vf;
     return Value();
   }
   if (name == "putfarray") {
-    int n = args[0].vi;
-    float *ptr = (float*) args[1].vi;
+    int n = callArgs[0].vi;
+    float *ptr = (float*) callArgs[1].vi;
     outbuf << n << ":";
     for (int i = 0; i < n; i++) {
       outbuf << " " << ptr[i];
@@ -288,7 +322,7 @@ Interpreter::Value Interpreter::applyExtern(const std::string &name, const std::
   sys_unreachable("unknown extern function: " << name);
 }
 
-Interpreter::Value Interpreter::execf(Region *region, const std::vector<Value> &args) {
+Interpreter::Value Interpreter::execf(Region *region, const std::vector<Value> &fnArgs) {
   auto entry = region->getFirstBlock();
   ip = entry->getFirstOp();
   while (!isa<ReturnOp>(ip)) {
@@ -315,37 +349,45 @@ Interpreter::Value Interpreter::execf(Region *region, const std::vector<Value> &
       break;
     }
     case CallOp::id: {
+      const auto &name = NAME(ip);
+      auto operands = ip->getOperands();
+      std::vector<Value> callArgs;
+      callArgs.reserve(operands.size());
+      for (auto operand : operands)
+        callArgs.push_back(value[operand.defining]);
+
       bool utilized = false;
       switch (cache_type) {
       case 3: {
-        auto i = args[0].vi, j = args[1].vi, k = args[2].vi;
-        if (i < CACHE_3_N && j < CACHE_3_N && k < CACHE_3_N && i >= 0 && j >= 0 && k >= 0) {
-          value[ip] = { ((cache_3_ptr) cache)[i][j][k] };
-          utilized = true;
+        if (callArgs.size() >= 3) {
+          auto i = callArgs[0].vi, j = callArgs[1].vi, k = callArgs[2].vi;
+          if (i < CACHE_3_N && j < CACHE_3_N && k < CACHE_3_N && i >= 0 && j >= 0 && k >= 0) {
+            value[ip] = { ((cache_3_ptr) cache)[i][j][k] };
+            utilized = true;
+          }
         }
         break;
       }
       case 2: {
-        auto i = args[0].vi, j = args[1].vi;
-        if (i < CACHE_2_N && j < CACHE_2_N && i >= 0 && j >= 0) {
-          value[ip] = { ((cache_2_ptr) cache)[i][j] };
-          utilized = true;
+        if (callArgs.size() >= 2) {
+          auto i = callArgs[0].vi, j = callArgs[1].vi;
+          if (i < CACHE_2_N && j < CACHE_2_N && i >= 0 && j >= 0) {
+            value[ip] = { ((cache_2_ptr) cache)[i][j] };
+            utilized = true;
+          }
         }
         break;
       }
+      default:
+        break;
       }
       if (utilized) {
         ip = ip->nextOp();
         break;
       }
-      const auto &name = NAME(ip);
-      auto operands = ip->getOperands();
-      std::vector<Value> args;
-      args.reserve(operands.size());
-      for (auto operand : operands)
-        args.push_back(value[operand.defining]);
+
       if (isExtern(name)) {
-        value[ip] = applyExtern(name, args);
+        value[ip] = applyExtern(name, callArgs);
         ip = ip->nextOp();
       }
       else {
@@ -353,7 +395,7 @@ Interpreter::Value Interpreter::execf(Region *region, const std::vector<Value> &
         Value v;
         {
           SemanticScope scope(*this);
-          v = execf(fnMap[name]->getRegion(), args);
+          v = execf(fnMap[name]->getRegion(), callArgs);
         }
         value[call] = v;
         ip = call->nextOp();
@@ -361,7 +403,10 @@ Interpreter::Value Interpreter::execf(Region *region, const std::vector<Value> &
       break;
     }
     case GetArgOp::id: {
-      value[ip] = args[V(ip)];
+      int argIndex = V(ip);
+      if (argIndex < 0 || argIndex >= (int) fnArgs.size())
+        sys_unreachable("getarg out of range: " << argIndex);
+      value[ip] = fnArgs[argIndex];
       ip = ip->nextOp();
       break;
     }
@@ -394,12 +439,18 @@ void Interpreter::runFunction(const std::string &func, const std::vector<int> &a
   auto exit = execf(fnMap[func]->getRegion(), values);
   if (cache) {
     if (cache_type == 3) {
-      auto x = (cache_3_ptr) cache;
-      x[args[0]][args[1]][args[2]] = exit.vi;
+      if (args.size() >= 3 && args[0] >= 0 && args[1] >= 0 && args[2] >= 0 &&
+          args[0] < CACHE_3_N && args[1] < CACHE_3_N && args[2] < CACHE_3_N) {
+        auto x = (cache_3_ptr) cache;
+        x[args[0]][args[1]][args[2]] = exit.vi;
+      }
     }
     if (cache_type == 2) {
-      auto x = (cache_2_ptr) cache;
-      x[args[0]][args[1]] = exit.vi;
+      if (args.size() >= 2 && args[0] >= 0 && args[1] >= 0 &&
+          args[0] < CACHE_2_N && args[1] < CACHE_2_N) {
+        auto x = (cache_2_ptr) cache;
+        x[args[0]][args[1]] = exit.vi;
+      }
     }
   }
   retcode = exit.vi;

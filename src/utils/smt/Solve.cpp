@@ -1,6 +1,7 @@
 #include "SMT.h"
 #include <cassert>
 #include <chrono>
+#include <cstdlib>
 
 using namespace smt;
 
@@ -380,6 +381,7 @@ Bitvector BvSolver::blastMulMod(const Bitvector &a, const Bitvector &b, int x) {
   }
   std::cerr << "NYI\n";
   assert(false);
+  std::abort();
 }
 
 void BvSolver::blastEq(const Bitvector &a, const Bitvector &b) {
@@ -597,6 +599,7 @@ Bitvector BvSolver::blastOp(BvExpr *expr) {
       return cache[expr] = c;
     };
     assert(false && "lsh nyi");
+    std::abort();
   }
   case BvExpr::Extr: {
     // Zero-extend.
@@ -624,6 +627,7 @@ Bitvector BvSolver::blastOp(BvExpr *expr) {
   default:
     std::cerr << "unknown op: " << expr << "\n";
     assert(false);
+    std::abort();
   }
 }
 
@@ -773,6 +777,7 @@ int BvSolver::eval(BvExpr *expr) {
   default:
     std::cerr << "unsupported type " << BvExpr::names[expr->ty] << "\n";
     assert(false);
+    std::abort();
   }
 }
 

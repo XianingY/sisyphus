@@ -1,5 +1,6 @@
 #include "Matcher.h"
 #include "../codegen/Attrs.h"
+#include <cstdlib>
 #include <iostream>
 
 using namespace sys;
@@ -324,6 +325,7 @@ int Rule::evalExpr(Expr *expr) {
 
   std::cerr << "unknown opname: " << opname << "\n";
   assert(false);
+  std::abort();
 }
 
 float Rule::evalFExpr(Expr *expr) {
@@ -355,6 +357,7 @@ float Rule::evalFExpr(Expr *expr) {
 
   std::cerr << "unknown opname: " << opname << "\n";
   assert(false);
+  std::abort();
 }
 
 Op *Rule::buildExpr(Expr *expr) {
@@ -432,6 +435,7 @@ Op *Rule::buildExpr(Expr *expr) {
 
   std::cerr << "unknown opname: " << opname << "\n";
   assert(false);
+  std::abort();
 }
 
 bool Rule::match(Op *op, const std::map<std::string, Op*> &external) {

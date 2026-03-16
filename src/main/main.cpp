@@ -170,7 +170,8 @@ void initCorePipelineO1(sys::PassManager &pm) {
   pm.addPass<sys::DLE>();
   pm.addPass<sys::DCE>();
   pm.addPass<sys::InlineStore>();
-  pm.addPass<sys::SynthConstArray>();
+  if (opts.enableExperimental)
+    pm.addPass<sys::SynthConstArray>();
   pm.addPass<sys::RegularFold>();
   pm.addPass<sys::DCE>();
   pm.addPass<sys::GCM>();

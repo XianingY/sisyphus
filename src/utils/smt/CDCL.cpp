@@ -1,7 +1,8 @@
 #include "CDCL.h"
 #include <algorithm>
-#include <set>
 #include <cassert>
+#include <cstdlib>
+#include <set>
 #include <unordered_set>
 
 using namespace smt;
@@ -336,6 +337,7 @@ std::pair<Variable, Solver::Boolean> Solver::pickPivot() {
       return { v, phase[v] == Unassigned ? True : phase[v] };
   }
   assert(false);
+  std::abort();
 }
 
 void Solver::init(int varcnt) {
@@ -354,13 +356,13 @@ void Solver::init(int varcnt) {
 }
 
 Atomic Solver::findUnit(const std::vector<Atomic> &unit) {
-  int unassigned = 0;
   for (auto x : unit) {
     auto var = VAR(x);
     if (assignment[var] == Unassigned)
       return x;
   }
   assert(false);
+  std::abort();
 }
 
 // False for unsatisfiable.

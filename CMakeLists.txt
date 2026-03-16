@@ -24,7 +24,15 @@ if(DEFAULT_TARGET STREQUAL "arm")
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  target_compile_options(compiler PRIVATE -O2 -g -Wall -Wextra -Wno-sign-compare -Wno-parentheses)
+  target_compile_options(compiler PRIVATE
+    -O2
+    -g
+    -Wall
+    -Wextra
+    -Werror=return-type
+    -Wno-sign-compare
+    -Wno-parentheses
+  )
 endif()
 
 include(CTest)

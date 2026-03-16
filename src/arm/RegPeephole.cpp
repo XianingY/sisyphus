@@ -69,6 +69,8 @@ int RegAlloc::latePeephole(Op *funcOp) {
   runRewriter(funcOp, [&](StrWOp *op) {
     if (op == op->getParent()->getLastOp())
       return false;
+    if (!op->has<RsAttr>() || !op->has<Rs2Attr>() || !op->has<SizeAttr>() || !op->has<IntAttr>())
+      return false;
 
     //   sw a0, N(addr)
     //   lw a1, N(addr)
@@ -77,6 +79,7 @@ int RegAlloc::latePeephole(Op *funcOp) {
     //   mv a1, a0
     auto next = op->nextOp();
     if (isa<LdrWOp>(next) &&
+        next->has<RsAttr>() && next->has<RdAttr>() && next->has<SizeAttr>() && next->has<IntAttr>() &&
         RS(next) == RS2(op) && V(next) == V(op) && SIZE(next) == SIZE(op)) {
       converted++;
       builder.setBeforeOp(next);

@@ -23,6 +23,7 @@ Options::Options() {
   stats = false;
   dumpPassTiming = false;
   verify = false;
+  enableExperimental = false;
   sat = false;
   bv = false;
 }
@@ -112,6 +113,7 @@ Options sys::parseArgs(int argc, char **argv) {
     PARSEOPT("--verify", verify);
     PARSEOPT("--verify-ir", verify);
     PARSEOPT("--dump-pass-timing", dumpPassTiming);
+    PARSEOPT("--enable-experimental", enableExperimental);
     PARSEOPT("--bv", bv);
     PARSEOPT("--sat", sat);
 

@@ -2,6 +2,7 @@
 #include "Attrs.h"
 #include "Ops.h"
 
+#include <cstdlib>
 #include <deque>
 #include <unordered_map>
 
@@ -201,6 +202,7 @@ void Op::removeOperand(Op *v) {
     }
   }
   assert(false);
+  std::abort();
 }
 
 int Op::replaceOperand(Op *before, Value v) {
@@ -212,6 +214,7 @@ int Op::replaceOperand(Op *before, Value v) {
     }
   }
   assert(false);
+  std::abort();
 }
 
 void Op::setAttribute(int i, Attr *attr) {
@@ -283,6 +286,7 @@ Op *Op::getPhiFrom(Op *phi, BasicBlock *bb) {
 
   std::cerr << "no operand from " << bbmap[bb] << ": " << phi;
   assert(false);
+  std::abort();
 }
 
 BasicBlock *Op::getPhiFrom(Op *phi, Op *op) {
@@ -293,6 +297,7 @@ BasicBlock *Op::getPhiFrom(Op *phi, Op *op) {
       return FROM(attrs[i]);
   }
   assert(false);
+  std::abort();
 }
 
 static std::map<Op*, int> valueName = {};

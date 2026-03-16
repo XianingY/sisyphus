@@ -3,6 +3,7 @@
 #include "Attrs.h"
 #include "OpBase.h"
 #include "Ops.h"
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 
@@ -161,6 +162,7 @@ Value CodeGen::emitBinary(BinaryNode *node) {
       return builder.create<LeOp>({ l, r });
     default:
       assert(false);
+      std::abort();
     }
   } else {
     switch (node->kind) {
@@ -185,6 +187,7 @@ Value CodeGen::emitBinary(BinaryNode *node) {
     default:
       std::cerr << "unsupported float binary " << node->kind << "\n";
       assert(false);
+      std::abort();
     }
   }
 }
@@ -205,6 +208,7 @@ Value CodeGen::emitUnary(UnaryNode *node) {
       return builder.create<MinusOp>({ value });
   }
   assert(false);
+  std::abort();
 }
 
 Value CodeGen::emitExpr(ASTNode *node) {
@@ -310,6 +314,7 @@ Value CodeGen::emitExpr(ASTNode *node) {
 
   std::cerr << "cannot codegen node type " << node->getID() << "\n";
   assert(false);
+  std::abort();
 }
 
 void CodeGen::emit(ASTNode *node) {

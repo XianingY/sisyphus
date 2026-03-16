@@ -16,6 +16,7 @@ Sisyphus is a SysY compiler project for the 2025 compiler contest track.
   - `--emit-ir`
   - `--verify-ir`
   - `--dump-pass-timing`
+  - `--enable-experimental` (opt-in for experimental O1 passes; off by default)
 
 ## Build
 
@@ -50,6 +51,23 @@ cmake --build build -j
 
 ```bash
 scripts/run_smoke.sh
+```
+
+## Regression
+
+```bash
+# Compile-only regression
+scripts/regression.sh test/custom riscv O0
+scripts/regression.sh test/custom riscv O1
+scripts/regression.sh test/custom arm O0
+scripts/regression.sh test/custom arm O1
+
+# Semantic compare (interpreter vs expected output)
+scripts/compare.sh test/custom riscv O1
+scripts/compare.sh test/custom arm O1
+
+# Fast O0/O1 assembly-size proxy
+scripts/asm-delta.sh test/custom riscv
 ```
 
 ## Runtime

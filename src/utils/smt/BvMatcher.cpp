@@ -1,5 +1,6 @@
 #include "BvMatcher.h"
 #include "../DynamicCast.h"
+#include <cstdlib>
 #include <iostream>
 
 using namespace smt;
@@ -258,6 +259,7 @@ int BvRule::evalExpr(Expr *expr) {
 
   std::cerr << "unknown opname: " << opname << "\n";
   assert(false);
+  std::abort();
 }
 
 
@@ -313,6 +315,7 @@ BvExpr *BvRule::buildExpr(Expr *expr) {
 
   std::cerr << "unknown opname: " << opname << "\n";
   assert(false);
+  std::abort();
 }
 
 BvExpr *BvRule::extract(const std::string &name) {

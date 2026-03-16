@@ -20,6 +20,7 @@ struct Options {
     option stats : 1;
     option dumpPassTiming : 1;
     option verify : 1;
+    option enableExperimental : 1;
     option bv : 1;
     option sat : 1;
   };

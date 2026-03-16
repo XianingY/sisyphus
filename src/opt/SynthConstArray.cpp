@@ -1,6 +1,7 @@
 #include "SMTPasses.h"
 #include "LoopPasses.h"
 #include "../utils/Matcher.h"
+#include <cstdlib>
 
 using namespace sys;
 using namespace smt;
@@ -181,6 +182,7 @@ Op *SynthConstArray::reconstruct(smt::BvExpr *expr, Op *subscript, int c0, int c
     if (expr->name == "c1")
       return builder.create<IntOp>({ new IntAttr(c1) });
     assert(false);
+    std::abort();
   case BvExpr::Add: {
     Value l = reconstruct(expr->l, subscript, c0, c1);
     Value r = reconstruct(expr->r, subscript, c0, c1);
@@ -208,6 +210,7 @@ Op *SynthConstArray::reconstruct(smt::BvExpr *expr, Op *subscript, int c0, int c
   }
   default:
     assert(false);
+    std::abort();
   }
 }
 
@@ -282,8 +285,6 @@ void SynthConstArray::run() {
 
     if (!correct)
       continue;
-
-    std::cerr << "found: " << correct << "\n";
 
     // Now replace every load to this const array.
     std::vector<Op*> getself;

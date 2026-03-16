@@ -3,6 +3,7 @@
 #include "Lexer.h"
 #include "Type.h"
 #include "TypeContext.h"
+#include <cstdlib>
 #include <ostream>
 #include <vector>
 
@@ -143,6 +144,7 @@ Type *Parser::parseSimpleType() {
   default:
     std::cerr << "unknown type: " << peek().type << "\n";
     assert(false);
+    std::abort();
   }
 }
 
@@ -285,6 +287,7 @@ ASTNode *Parser::primary() {
   std::cerr << "unexpected token " << peek().type << "\n";
   printSurrounding();
   assert(false);
+  std::abort();
 }
 
 ASTNode *Parser::unary() {
@@ -756,6 +759,7 @@ ConstValue Parser::earlyFold(ASTNode *node) {
 
   std::cerr << "not constexpr: " << node->getID() << "\n";
   assert(false);
+  std::abort();
 }
 
 Parser::Parser(const std::string &input, TypeContext &ctx): loc(0), ctx(ctx) {
