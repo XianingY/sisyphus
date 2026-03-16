@@ -1,0 +1,155 @@
+#include "Options.h"
+#include <cstring>
+#include <iostream>
+#include <string>
+
+using namespace sys;
+
+#define PARSEOPT(str, field) \
+  if (strcmp(argv[i], str) == 0) { \
+    opts.field = true; \
+    continue; \
+  }
+
+Options::Options() {
+  noLink = false;
+  dumpAST = false;
+  dumpMidIR = false;
+  emitIR = false;
+  o1 = false;
+  arm = false;
+  rv = false;
+  verbose = false;
+  stats = false;
+  dumpPassTiming = false;
+  verify = false;
+  sat = false;
+  bv = false;
+}
+
+Options sys::parseArgs(int argc, char **argv) {
+  Options opts;
+
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--target") == 0) {
+      if (i + 1 >= argc) {
+        std::cerr << "error: --target requires value arm|riscv\n";
+        exit(1);
+      }
+      std::string target = argv[++i];
+      if (target == "arm")
+        opts.arm = true;
+      else if (target == "riscv" || target == "rv")
+        opts.rv = true;
+      else {
+        std::cerr << "error: unknown target '" << target << "'\n";
+        exit(1);
+      }
+      continue;
+    }
+
+    if (strncmp(argv[i], "--target=", 9) == 0) {
+      std::string target = argv[i] + 9;
+      if (target == "arm")
+        opts.arm = true;
+      else if (target == "riscv" || target == "rv")
+        opts.rv = true;
+      else {
+        std::cerr << "error: unknown target '" << target << "'\n";
+        exit(1);
+      }
+      continue;
+    }
+
+    if (strcmp(argv[i], "-o") == 0) {
+      if (i + 1 >= argc) {
+        std::cerr << "error: -o requires output file\n";
+        exit(1);
+      }
+      opts.outputFile = argv[i + 1];
+      i++;
+      continue;
+    }
+
+    if (strcmp(argv[i], "--print-after") == 0) {
+      opts.printAfter = argv[i + 1];
+      i++;
+      continue;
+    }
+
+    if (strcmp(argv[i], "--print-before") == 0) {
+      opts.printBefore = argv[i + 1];
+      i++;
+      continue;
+    }
+    
+    if (strcmp(argv[i], "--compare") == 0) {
+      opts.compareWith = argv[i + 1];
+      i++;
+      continue;
+    }
+
+    if (strcmp(argv[i], "-i") == 0) {
+      opts.simulateInput = argv[i + 1];
+      i++;
+      continue;
+    }
+
+    PARSEOPT("--dump-ast", dumpAST);
+    PARSEOPT("--dump-mid-ir", dumpMidIR);
+    PARSEOPT("--emit-ir", emitIR);
+    PARSEOPT("--rv", rv);
+    PARSEOPT("--arm", arm);
+    PARSEOPT("-O1", o1);
+    if (strcmp(argv[i], "-O0") == 0) {
+      opts.o1 = false;
+      continue;
+    }
+    PARSEOPT("-S", noLink);
+    PARSEOPT("-v", verbose);
+    PARSEOPT("--stats", stats);
+    PARSEOPT("-s", stats);
+    PARSEOPT("--verify", verify);
+    PARSEOPT("--verify-ir", verify);
+    PARSEOPT("--dump-pass-timing", dumpPassTiming);
+    PARSEOPT("--bv", bv);
+    PARSEOPT("--sat", sat);
+
+    if (argv[i][0] == '-') {
+      std::cerr << "error: unknown option '" << argv[i] << "'\n";
+      exit(1);
+    }
+
+    if (opts.inputFile != "") {
+      std::cerr << "error: multiple inputs\n";
+      exit(1);
+    }
+
+    opts.inputFile = argv[i];
+  }
+
+  if (opts.rv && opts.arm) {
+    std::cerr << "error: multiple target\n";
+    exit(1);
+  }
+
+  if (!opts.rv && !opts.arm) {
+#ifdef DEFAULT_TARGET_ARM
+    opts.arm = true;
+#else
+    opts.rv = true;
+#endif
+  }
+
+  if (opts.emitIR)
+    opts.dumpMidIR = true;
+
+  if (opts.inputFile.empty() && !opts.bv && !opts.sat) {
+    std::cerr
+      << "usage: compiler <input.sy> -S -o <output.s> [-O0|-O1] [--target=riscv|arm]\n"
+      << "       compiler <input.sy> -S -o <output.s> --emit-ir --verify-ir\n";
+    exit(1);
+  }
+
+  return opts;
+}
