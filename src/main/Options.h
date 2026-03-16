@@ -21,6 +21,8 @@ struct Options {
     option dumpPassTiming : 1;
     option verify : 1;
     option enableExperimental : 1;
+    option disableLoopRotate : 1;
+    option disableConstUnroll : 1;
     option bv : 1;
     option sat : 1;
   };
@@ -31,6 +33,8 @@ struct Options {
   std::string printBefore;
   std::string compareWith;
   std::string simulateInput;
+  int inlineThreshold;
+  int lateInlineThreshold;
   
   Options();
 };

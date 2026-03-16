@@ -17,6 +17,10 @@ Sisyphus is a SysY compiler project for the 2025 compiler contest track.
   - `--verify-ir`
   - `--dump-pass-timing`
   - `--enable-experimental` (opt-in for experimental O1 passes; off by default)
+  - `--inline-threshold=<N>`
+  - `--late-inline-threshold=<N>`
+  - `--disable-loop-rotate`
+  - `--disable-const-unroll`
 
 ## Build
 
@@ -68,6 +72,9 @@ scripts/compare.sh test/custom arm O1
 
 # Fast O0/O1 assembly-size proxy
 scripts/asm-delta.sh test/custom riscv
+
+# Matrix evaluation for O1 tuning candidates
+scripts/eval-o1-matrix.sh test/custom
 ```
 
 ## Runtime

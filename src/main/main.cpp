@@ -108,7 +108,7 @@ void initCorePipelineO1(sys::PassManager &pm) {
   pm.addPass<sys::FlattenCFG>();
   pm.addPass<sys::GVN>();
   pm.addPass<sys::DCE>();
-  pm.addPass<sys::Inline>(/*inlineThreshold=*/ 200);
+  pm.addPass<sys::Inline>(/*inlineThreshold=*/ opts.inlineThreshold);
   pm.addPass<sys::DCE>();
   pm.addPass<sys::Localize>(/*beforeFlattenCFG=*/ false);
   pm.addPass<sys::Globalize>();
@@ -128,10 +128,12 @@ void initCorePipelineO1(sys::PassManager &pm) {
   // ===== Loop Optimization =====
 
   pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
-  pm.addPass<sys::LoopRotate>();
+  if (!opts.disableLoopRotate)
+    pm.addPass<sys::LoopRotate>();
   pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ false);
   pm.addPass<sys::LICM>();
-  pm.addPass<sys::ConstLoopUnroll>();
+  if (!opts.disableConstUnroll)
+    pm.addPass<sys::ConstLoopUnroll>();
   pm.addPass<sys::SCEV>();
   pm.addPass<sys::AggressiveDCE>();
   if (opts.arm) // RV doesn't support SIMD.
@@ -162,7 +164,7 @@ void initCorePipelineO1(sys::PassManager &pm) {
 
   // ===== Late Inline =====
 
-  pm.addPass<sys::LateInline>(/*threshold=*/ 200);
+  pm.addPass<sys::LateInline>(/*threshold=*/ opts.lateInlineThreshold);
   pm.addPass<sys::RegularFold>();
   pm.addPass<sys::GVN>();
   pm.addPass<sys::Alias>();

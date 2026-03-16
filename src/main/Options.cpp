@@ -1,4 +1,5 @@
 #include "Options.h"
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -24,12 +25,25 @@ Options::Options() {
   dumpPassTiming = false;
   verify = false;
   enableExperimental = false;
+  disableLoopRotate = false;
+  disableConstUnroll = false;
   sat = false;
   bv = false;
+  inlineThreshold = 200;
+  lateInlineThreshold = 200;
 }
 
 Options sys::parseArgs(int argc, char **argv) {
   Options opts;
+  auto parsePositiveInt = [&](const char *raw, const char *optname) -> int {
+    char *end = nullptr;
+    long value = std::strtol(raw, &end, 10);
+    if (!raw[0] || (end && *end) || value <= 0 || value > 1000000) {
+      std::cerr << "error: " << optname << " expects a positive integer, got '" << raw << "'\n";
+      exit(1);
+    }
+    return (int) value;
+  };
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--target") == 0) {
@@ -96,6 +110,34 @@ Options sys::parseArgs(int argc, char **argv) {
       continue;
     }
 
+    if (strcmp(argv[i], "--inline-threshold") == 0) {
+      if (i + 1 >= argc) {
+        std::cerr << "error: --inline-threshold requires value\n";
+        exit(1);
+      }
+      opts.inlineThreshold = parsePositiveInt(argv[++i], "--inline-threshold");
+      continue;
+    }
+
+    if (strncmp(argv[i], "--inline-threshold=", 19) == 0) {
+      opts.inlineThreshold = parsePositiveInt(argv[i] + 19, "--inline-threshold");
+      continue;
+    }
+
+    if (strcmp(argv[i], "--late-inline-threshold") == 0) {
+      if (i + 1 >= argc) {
+        std::cerr << "error: --late-inline-threshold requires value\n";
+        exit(1);
+      }
+      opts.lateInlineThreshold = parsePositiveInt(argv[++i], "--late-inline-threshold");
+      continue;
+    }
+
+    if (strncmp(argv[i], "--late-inline-threshold=", 24) == 0) {
+      opts.lateInlineThreshold = parsePositiveInt(argv[i] + 24, "--late-inline-threshold");
+      continue;
+    }
+
     PARSEOPT("--dump-ast", dumpAST);
     PARSEOPT("--dump-mid-ir", dumpMidIR);
     PARSEOPT("--emit-ir", emitIR);
@@ -114,6 +156,8 @@ Options sys::parseArgs(int argc, char **argv) {
     PARSEOPT("--verify-ir", verify);
     PARSEOPT("--dump-pass-timing", dumpPassTiming);
     PARSEOPT("--enable-experimental", enableExperimental);
+    PARSEOPT("--disable-loop-rotate", disableLoopRotate);
+    PARSEOPT("--disable-const-unroll", disableConstUnroll);
     PARSEOPT("--bv", bv);
     PARSEOPT("--sat", sat);
 
@@ -149,6 +193,8 @@ Options sys::parseArgs(int argc, char **argv) {
   if (opts.inputFile.empty() && !opts.bv && !opts.sat) {
     std::cerr
       << "usage: compiler <input.sy> -S -o <output.s> [-O0|-O1] [--target=riscv|arm]\n"
+      << "       [--inline-threshold=N] [--late-inline-threshold=N]\n"
+      << "       [--disable-loop-rotate] [--disable-const-unroll]\n"
       << "       compiler <input.sy> -S -o <output.s> --emit-ir --verify-ir\n";
     exit(1);
   }

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 <case_dir> [riscv|arm] [O0|O1]"
+  echo "usage: $0 <case_dir> [riscv|arm] [O0|O1] [extra compiler args...]"
   exit 1
 fi
 
@@ -11,7 +11,12 @@ COMPILER="${ROOT_DIR}/build/compiler"
 CASE_DIR="$1"
 TARGET="${2:-riscv}"
 OPT="${3:-O1}"
+EXTRA_ARGS=("${@:4}")
+TAG="${OUT_TAG:-}"
 OUT_DIR="${ROOT_DIR}/tests/.out/compare-${TARGET}-${OPT}"
+if [[ -n "${TAG}" ]]; then
+  OUT_DIR="${OUT_DIR}-${TAG}"
+fi
 
 mkdir -p "${OUT_DIR}"
 
@@ -35,7 +40,7 @@ for f in "${CASE_DIR}"/*.sy; do
     continue
   fi
 
-  cmd=("${COMPILER}" "${f}" -S -o "${OUT_DIR}/${base}.s" "--target=${TARGET}" "-${OPT}" --compare "${out}")
+  cmd=("${COMPILER}" "${f}" -S -o "${OUT_DIR}/${base}.s" "--target=${TARGET}" "-${OPT}" "${EXTRA_ARGS[@]}" --compare "${out}")
   if [[ -f "${in}" ]]; then
     cmd+=(-i "${in}")
   fi
