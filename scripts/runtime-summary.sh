@@ -80,7 +80,7 @@ NR == 1 { next }
 {
   total++;
   is_pass = ($8 == "1");
-  is_perf = (index($2, "perf/") == 1);
+  is_perf = (index($2, "perf/") == 1) || ($1 == "open-perf");
   if (is_pass) pass++; else fail++;
   if ($6 == "timeout") timeout_count++;
 
