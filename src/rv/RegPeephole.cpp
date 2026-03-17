@@ -409,6 +409,8 @@ void RegAlloc::tidyup(Region *region) {
   } while (changed);
 
   for (auto bb : region->getBlocks()) { 
+    if (bb->getOpCount() == 0)
+      continue;
     auto term = bb->getLastOp();
     if (auto target = term->find<TargetAttr>()) {
       if (jumpTo.count(target->bb))
@@ -514,11 +516,82 @@ void RegAlloc::tidyup(Region *region) {
   REPLACE_BRANCH(BeqOp, BneOp);
   REPLACE_BRANCH(BleOp, BgtOp);
 
+  auto inRange12 = [](int x) { return x > -2048 && x < 2048; };
+  auto legalizeLargeMemOffsets = [&]() {
+    runRewriter(funcOp, [&](sys::rv::LoadOp *op) {
+      if (inRange12(V(op)))
+        return false;
+
+      Reg base = RS(op);
+      Reg dst = RD(op);
+      Reg tmp = (base == spillReg2 || dst == spillReg2) ? spillReg : spillReg2;
+
+      builder.setBeforeOp(op);
+      builder.create<LiOp>({ RDC(tmp), new IntAttr(V(op)) });
+      builder.create<AddOp>({ RDC(tmp), RSC(tmp), RS2C(base) });
+      builder.replace<sys::rv::LoadOp>(op, op->getResultType(), {
+        RDC(dst), RSC(tmp), new IntAttr(0), new SizeAttr(SIZE(op))
+      });
+      return true;
+    });
+
+    runRewriter(funcOp, [&](sys::rv::StoreOp *op) {
+      if (inRange12(V(op)))
+        return false;
+
+      Reg src = RS(op);
+      Reg base = RS2(op);
+      Reg tmp = (src == spillReg2 || base == spillReg2) ? spillReg : spillReg2;
+
+      builder.setBeforeOp(op);
+      builder.create<LiOp>({ RDC(tmp), new IntAttr(V(op)) });
+      builder.create<AddOp>({ RDC(tmp), RSC(tmp), RS2C(base) });
+      builder.replace<sys::rv::StoreOp>(op, {
+        RSC(src), RS2C(tmp), new IntAttr(0), new SizeAttr(SIZE(op))
+      });
+      return true;
+    });
+
+    runRewriter(funcOp, [&](FldOp *op) {
+      if (inRange12(V(op)))
+        return false;
+
+      Reg base = RS(op);
+      Reg dst = RD(op);
+      Reg tmp = (base == spillReg2 || dst == spillReg2) ? spillReg : spillReg2;
+
+      builder.setBeforeOp(op);
+      builder.create<LiOp>({ RDC(tmp), new IntAttr(V(op)) });
+      builder.create<AddOp>({ RDC(tmp), RSC(tmp), RS2C(base) });
+      builder.replace<FldOp>(op, { RDC(dst), RSC(tmp), new IntAttr(0) });
+      return true;
+    });
+
+    runRewriter(funcOp, [&](FsdOp *op) {
+      if (inRange12(V(op)))
+        return false;
+
+      Reg src = RS(op);
+      Reg base = RS2(op);
+      Reg tmp = (src == spillReg2 || base == spillReg2) ? spillReg : spillReg2;
+
+      builder.setBeforeOp(op);
+      builder.create<LiOp>({ RDC(tmp), new IntAttr(V(op)) });
+      builder.create<AddOp>({ RDC(tmp), RSC(tmp), RS2C(base) });
+      builder.replace<FsdOp>(op, { RSC(src), RS2C(tmp), new IntAttr(0) });
+      return true;
+    });
+  };
+
+  legalizeLargeMemOffsets();
+
   int converted;
   do {
     converted = latePeephole(funcOp);
     convertedTotal += converted;
   } while (converted);
+
+  legalizeLargeMemOffsets();
 
   // Also, eliminate useless JOp.
   runRewriter(funcOp, [&](JOp *op) {
@@ -565,6 +638,55 @@ void save(Builder builder, const std::vector<Reg> &regs, int offset) {
     builder.create<FldOp>({ RDC(reg), RSC(addr), new IntAttr(offset) }); \
   else \
     builder.create<LoadOp>(ty, { RDC(reg), RSC(addr), new IntAttr(offset), new SizeAttr(8) });
+
+namespace {
+
+bool fitsImm12(int x) {
+  return x > -2048 && x < 2048;
+}
+
+void materializeSpAddr(Builder &builder, Reg tmp, int offset) {
+  if (fitsImm12(offset))
+    builder.create<AddiOp>({ RDC(tmp), RSC(Reg::sp), new IntAttr(offset) });
+  else {
+    builder.create<LiOp>({ RDC(tmp), new IntAttr(offset) });
+    builder.create<AddOp>({ RDC(tmp), RSC(tmp), RS2C(Reg::sp) });
+  }
+}
+
+void emitStackLoad(Builder &builder, Reg dst, Value::Type ty, int offset) {
+  if (fitsImm12(offset)) {
+    builder.create<sys::rv::LoadOp>(ty, {
+      RDC(dst),
+      RSC(Reg::sp),
+      new IntAttr(offset),
+      new SizeAttr(8)
+    });
+    return;
+  }
+
+  materializeSpAddr(builder, spillReg2, offset);
+  builder.create<sys::rv::LoadOp>(ty, {
+    RDC(dst),
+    RSC(spillReg2),
+    new IntAttr(0),
+    new SizeAttr(8)
+  });
+}
+
+void emitSpAdjust(Builder &builder, int delta) {
+  while (delta != 0) {
+    int step = delta;
+    if (step > 2047)
+      step = 2047;
+    if (step < -2047)
+      step = -2047;
+    builder.create<AddiOp>({ RDC(Reg::sp), RSC(Reg::sp), new IntAttr(step) });
+    delta -= step;
+  }
+}
+
+}
 
 void load(Builder builder, const std::vector<Reg> &regs, int offset) {
   using sys::rv::LoadOp;
@@ -650,8 +772,7 @@ void RegAlloc::proEpilogue(FuncOp *funcOp, bool isLeaf) {
   }
 
   runRewriter(funcOp, [&](GetArgOp *op) {
-    auto value = V(op);
-    assert(value >= 8);
+    assert(V(op) >= 8);
 
     // `sp + offset` is the base pointer.
     // We read past the base pointer (starting from 0):
@@ -661,12 +782,11 @@ void RegAlloc::proEpilogue(FuncOp *funcOp, bool isLeaf) {
     assert(argOffsets.count(op));
     int myoffset = offset + argOffsets[op];
     builder.setBeforeOp(op);
-    builder.replace<LoadOp>(op, isFP(RD(op)) ? Value::f32 : Value::i64, {
-      RDC(RD(op)),
-      RSC(Reg::sp),
-      new IntAttr(myoffset),
-      new SizeAttr(8)
-    });
+    emitStackLoad(builder, RD(op), isFP(RD(op)) ? Value::f32 : Value::i64, myoffset);
+    auto created = op->prevOp();
+    if (created)
+      op->replaceAllUsesWith(created);
+    op->erase();
     return false;
   });
 
@@ -674,18 +794,9 @@ void RegAlloc::proEpilogue(FuncOp *funcOp, bool isLeaf) {
   // becomes
   //   addi <rd = sp> <rs = sp> <-4>
   runRewriter(funcOp, [&](SubSpOp *op) {
-    int offset = V(op);
-    if (offset <= 2048 && offset > -2048)
-      builder.replace<AddiOp>(op, { RDC(Reg::sp), RSC(Reg::sp), new IntAttr(-offset) });
-    else {
-      builder.setBeforeOp(op);
-      builder.create<LiOp>({ RDC(Reg::t0), new IntAttr(offset) });
-      builder.replace<SubOp>(op, {
-        RDC(Reg::sp),
-        RSC(Reg::sp),
-        RS2C(Reg::t0)
-      });
-    }
+    builder.setBeforeOp(op);
+    emitSpAdjust(builder, -V(op));
+    op->erase();
     return true;
   });
 }

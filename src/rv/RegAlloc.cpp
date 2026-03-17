@@ -44,6 +44,45 @@ public:
   SpilledRs2Attr *clone() override { return new SpilledRs2Attr(fp, offset, ref); }
 };
 
+bool fitsImm12(int x) {
+  return x > -2048 && x < 2048;
+}
+
+void materializeSpAddr(Builder &builder, Reg tmp, int offset) {
+  if (fitsImm12(offset))
+    builder.create<AddiOp>({ RDC(tmp), RSC(Reg::sp), new IntAttr(offset) });
+  else {
+    builder.create<LiOp>({ RDC(tmp), new IntAttr(offset) });
+    builder.create<AddOp>({ RDC(tmp), RSC(tmp), RS2C(Reg::sp) });
+  }
+}
+
+void emitStackStore(Builder &builder, Reg src, bool fp, int offset) {
+  if (fitsImm12(offset)) {
+    if (fp)
+      builder.create<FsdOp>({ RSC(src), RS2C(Reg::sp), new IntAttr(offset) });
+    else
+      builder.create<sys::rv::StoreOp>({ RSC(src), RS2C(Reg::sp), new IntAttr(offset), new SizeAttr(8) });
+    return;
+  }
+
+  materializeSpAddr(builder, spillReg2, offset);
+  if (fp)
+    builder.create<FsdOp>({ RSC(src), RS2C(spillReg2), new IntAttr(0) });
+  else
+    builder.create<sys::rv::StoreOp>({ RSC(src), RS2C(spillReg2), new IntAttr(0), new SizeAttr(8) });
+}
+
+void emitStackLoad(Builder &builder, Reg dst, Value::Type ty, int offset, Reg addrTmp) {
+  if (fitsImm12(offset)) {
+    builder.create<sys::rv::LoadOp>(ty, { RDC(dst), RSC(Reg::sp), new IntAttr(offset), new SizeAttr(8) });
+    return;
+  }
+
+  materializeSpAddr(builder, addrTmp, offset);
+  builder.create<sys::rv::LoadOp>(ty, { RDC(dst), RSC(addrTmp), new IntAttr(0), new SizeAttr(8) });
+}
+
 }
 
 std::map<std::string, int> RegAlloc::stats() {
@@ -222,12 +261,20 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
     bbIndex[bb] = idx++;
   for (auto bb : region->getBlocks()) {
     int w = 1;
+    if (bb->getOpCount() == 0) {
+      bbWeight[bb] = w;
+      continue;
+    }
     auto term = bb->getLastOp();
     bool hasBackEdge = false;
-    if (auto target = term->find<TargetAttr>())
-      hasBackEdge = hasBackEdge || (bbIndex[target->bb] <= bbIndex[bb]);
-    if (auto ifnot = term->find<ElseAttr>())
-      hasBackEdge = hasBackEdge || (bbIndex[ifnot->bb] <= bbIndex[bb]);
+    if (auto target = term->find<TargetAttr>()) {
+      if (bbIndex.count(target->bb))
+        hasBackEdge = hasBackEdge || (bbIndex[target->bb] <= bbIndex[bb]);
+    }
+    if (auto ifnot = term->find<ElseAttr>()) {
+      if (bbIndex.count(ifnot->bb))
+        hasBackEdge = hasBackEdge || (bbIndex[ifnot->bb] <= bbIndex[bb]);
+    }
     if (hasBackEdge)
       w *= 8;
     for (auto op : bb->getOps()) {
@@ -778,6 +825,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       auto &attrs = phi->getAttrs();
       for (size_t i = 0; i < ops.size(); i++) {
         auto bb = FROM(attrs[i]);
+        if (!bb || bb->getParent() != region || bb->getOpCount() == 0)
+          continue;
         auto term = bb->getLastOp();
         builder.setBeforeOp(term);
         auto def = ops[i].defining;
@@ -958,13 +1007,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
         builder.setAfterOp(op);
         if (offset < delta)
           builder.create<FmvdxOp>({ RDC(Reg(delta - offset)), RSC(reg) });
-        else if (offset < 2048)
-          builder.create<StoreOp>({ RSC(reg), RS2C(Reg::sp), new IntAttr(offset), new SizeAttr(8) });
-        else if (offset < 4096) {
-          builder.create<AddiOp>({ RDC(spillReg2), RSC(Reg::sp), new IntAttr(2047), new SizeAttr(8) });
-          builder.create<StoreOp>({ RSC(reg), RS2C(spillReg2), new IntAttr(offset - 2047), new SizeAttr(8) });
-        }
-        else assert(false);
+        else
+          emitStackStore(builder, reg, fp, offset);
         op->add<RdAttr>(reg);
       }
 
@@ -983,13 +1027,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
           builder.create<LaOp>({ RDC(reg), new NameAttr(NAME(ref)) });
         else if (offset < delta)
           builder.create<FmvxdOp>({ RDC(reg), RSC(Reg(delta - offset)) });
-        else if (offset < 2048)
-          builder.create<LoadOp>(ldty, { RDC(reg), RSC(Reg::sp), new IntAttr(offset), new SizeAttr(8) });
-        else if (offset < 4096) {
-          builder.create<AddiOp>({ RDC(spillReg), RSC(Reg::sp), new IntAttr(2047), new SizeAttr(8) });
-          builder.create<LoadOp>(ldty, { RDC(reg), RSC(spillReg), new IntAttr(offset - 2047), new SizeAttr(8) });
-        }
-        else assert(false);
+        else
+          emitStackLoad(builder, reg, ldty, offset, spillReg2);
         op->add<RsAttr>(reg);
       }
 
@@ -1008,13 +1047,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
           builder.create<LaOp>({ RDC(reg), new NameAttr(NAME(ref)) });
         else if (offset < delta)
           builder.create<FmvxdOp>({ RDC(reg), RSC(Reg(delta - offset)) });
-        else if (offset < 2048)
-          builder.create<LoadOp>(ldty, { RDC(reg), RSC(Reg::sp), new IntAttr(offset), new SizeAttr(8) });
-        else if (offset < 4096) {
-          builder.create<AddiOp>({ RDC(spillReg2), RSC(Reg::sp), new IntAttr(2047), new SizeAttr(8) });
-          builder.create<LoadOp>(ldty, { RDC(reg), RSC(spillReg2), new IntAttr(offset - 2047), new SizeAttr(8) });
-        }
-        else assert(false);
+        else
+          emitStackLoad(builder, reg, ldty, offset, spillReg);
         op->add<Rs2Attr>(reg);
       }
     }
