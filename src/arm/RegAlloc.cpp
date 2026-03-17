@@ -267,6 +267,11 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
   int currentPriority = 2;
   for (auto bb : region->getBlocks()) {
     int localWeight = bbWeight[bb];
+    auto bumpPriority = [&](Op *x, int v) {
+      auto it = priority.find(x);
+      if (it == priority.end() || it->second < v)
+        priority[x] = v;
+    };
     // Scan through the block and see the place where the value's last used.
     std::map<Op*, int> lastUsed, defined;
     const auto &ops = bb->getOps();
@@ -307,12 +312,41 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
         }
         currentPriority += 2;
       }
+
+      // Preserve copy chains to reduce move pressure after allocation.
+      if ((isa<MovROp>(op) || isa<FmovOp>(op)) && op->getOperandCount() == 1) {
+        auto src = op->DEF(0);
+        prefer[op] = src;
+        bumpPriority(op, currentPriority + 2);
+        bumpPriority(src, currentPriority + 1);
+      }
     }
 
     // For all liveOuts, they are last-used at place size().
     // If they aren't defined in this block, then `defined[op]` will be zero, which is intended.
     for (auto op : bb->getLiveOut())
       lastUsed[op] = ops.size();
+
+    // Penalize long-lived values and values spanning call-like operations.
+    std::vector<int> callPrefix(ops.size() + 1, 0);
+    int callIdx = 0;
+    for (auto liveOp : ops) {
+      bool isCallLike = isa<BlOp>(liveOp) || isa<CloneOp>(liveOp) || isa<JoinOp>(liveOp);
+      callPrefix[callIdx + 1] = callPrefix[callIdx] + (isCallLike ? 1 : 0);
+      callIdx++;
+    }
+    for (auto [op, last] : lastUsed) {
+      int def = defined[op];
+      if (def >= last)
+        continue;
+      int span = last - def;
+      spillWeight[op] += 1LL * localWeight * span;
+
+      int l = std::max(0, def + 1);
+      int r = std::min<int>(ops.size(), last);
+      int callCount = callPrefix[r] - callPrefix[l];
+      spillWeight[op] += 48LL * localWeight * callCount;
+    }
 
     // We use event-driven approach to optimize it into O(n log n + E).
     std::vector<Event> events;

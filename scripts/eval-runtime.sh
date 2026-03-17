@@ -45,6 +45,14 @@ CSV_OUT="${RUNTIME_CSV:-${RUNTIME_ROOT}/${LABEL}-${SUITE}-${TARGET}-${OPT}.csv}"
 RUNTIME_CASE_LIMIT="${RUNTIME_CASE_LIMIT:-0}"
 RUNTIME_CASE_FILTER="${RUNTIME_CASE_FILTER:-}"
 RUNTIME_SOFT_PERF="${RUNTIME_SOFT_PERF:-0}"
+INDEX_SNAPSHOT=""
+
+cleanup() {
+  if [[ -n "${INDEX_SNAPSHOT}" && -f "${INDEX_SNAPSHOT}" ]]; then
+    rm -f "${INDEX_SNAPSHOT}"
+  fi
+}
+trap cleanup EXIT
 
 if [[ "${COMPILER_FLAVOR}" != "sisy" && "${COMPILER_FLAVOR}" != "biframe" ]]; then
   echo "error: SISY_COMPILER_FLAVOR must be sisy|biframe"
@@ -94,10 +102,23 @@ if [[ ! -x "${INDEX_SCRIPT}" ]]; then
   exit 1
 fi
 
-if [[ "${SUITE}" == "lvx" ]]; then
-  "${INDEX_SCRIPT}" --include-soft
+INDEX_LOCK="${ROOT_DIR}/tests/.out/suites/.index.lock"
+mkdir -p "$(dirname "${INDEX_LOCK}")"
+if command -v flock >/dev/null 2>&1; then
+  (
+    flock -x 9
+    if [[ "${SUITE}" == "lvx" ]]; then
+      "${INDEX_SCRIPT}" --include-soft
+    else
+      "${INDEX_SCRIPT}"
+    fi
+  ) 9>"${INDEX_LOCK}"
 else
-  "${INDEX_SCRIPT}"
+  if [[ "${SUITE}" == "lvx" ]]; then
+    "${INDEX_SCRIPT}" --include-soft
+  else
+    "${INDEX_SCRIPT}"
+  fi
 fi
 
 INDEX_CSV="${ROOT_DIR}/tests/.out/suites/index.csv"
@@ -105,6 +126,9 @@ if [[ ! -f "${INDEX_CSV}" ]]; then
   echo "error: index missing at ${INDEX_CSV}"
   exit 1
 fi
+INDEX_SNAPSHOT="$(mktemp)"
+cp "${INDEX_CSV}" "${INDEX_SNAPSHOT}"
+INDEX_CSV="${INDEX_SNAPSHOT}"
 
 if [[ "${TARGET}" == "riscv" ]]; then
   GCC_BIN="riscv64-linux-gnu-gcc"

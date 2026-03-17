@@ -43,4 +43,9 @@ RUNTIME_SOFT_PERF=1 RUNTIME_PERF_TIMEOUT_SEC=20 scripts/eval-runtime.sh compiler
 scripts/eval-vs-biframe.sh open-functional riscv O1
 scripts/runtime-summary.sh
 scripts/runtime-gate.sh
+# aggressive O2 tuning gate (O1 vs O2, defaults to perf timeout 20s)
+scripts/eval-o2-aggressive.sh compiler-dev riscv
+scripts/eval-o2-aggressive.sh compiler-dev arm 20
+# emergency stop for O2-only experimental passes
+scripts/regression.sh /path/to/cases riscv O2 --disable-o2-experimental
 ```
