@@ -5,10 +5,8 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "../parse/Parser.h"
-#include "../parse/Sema.h"
-#include "../codegen/CodeGen.h"
-#include "../opt/PassManager.h"
+#include "../frontend/FrontendFacade.h"
+#include "../pass/PassRegistry.h"
 #include "../utils/smt/SMT.h"
 
 using namespace smt;

@@ -1,9 +1,16 @@
 # Pass Mapping
 
-Optimization and lowering passes are currently implemented in:
+## Current State
+- Canonical pass entry: `src/pass/PassRegistry.h`
+- Current implementation lives in:
+  - `src/pre-opt`: structured control-flow passes
+  - `src/opt`: flattened CFG/SSA passes
+  - `src/rv` and `src/arm`: backend lowering/cleanup passes
 
-- `src/pre-opt`: structured control-flow optimization passes
-- `src/opt`: flattened CFG/SSA optimization passes
-- `src/rv` and `src/arm`: backend-specific lowering/cleanup passes
+## Boundary Rule
+- New wiring should use pass registry + pipeline profile APIs.
+- Direct includes to individual pass directories are allowed only in implementation files.
 
-This directory is reserved for a unified pass registry API.
+## Next Steps
+- Expand pass registry to expose named profile presets and profile dumps.
+- Keep pass ordering centralized under pipeline profile implementation.

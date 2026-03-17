@@ -11,10 +11,8 @@
 #include "../pre-opt/PrePasses.h"
 #include "../pre-opt/PreLoopPasses.h"
 #include "../pre-opt/PreAnalysis.h"
-#include "../arm/ArmPasses.h"
-#include "../arm/ArmLoopPasses.h"
-#include "../rv/RvPasses.h"
-#include "../rv/RvDupPasses.h"
+#include "../backend/arm/BackendPasses.h"
+#include "../backend/riscv/BackendPasses.h"
 
 namespace sys::pipeline {
 

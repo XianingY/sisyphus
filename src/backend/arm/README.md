@@ -1,5 +1,13 @@
 # ARM Backend Mapping
 
-Current ARM64 backend code is implemented in `src/arm`.
+## Current State
+- Canonical entry for new integration: `src/backend/arm/BackendPasses.h`
+- ARM64 implementation still lives in `src/arm`
 
-This directory marks the canonical target layout for future split-out.
+## Boundary Rule
+- New cross-module includes should reference `src/backend/arm/*` first.
+- `src/arm/*` remains implementation detail during migration.
+
+## Next Steps
+- Move pass declarations to backend namespace wrappers first.
+- Migrate implementation files incrementally (no bulk move).

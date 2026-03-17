@@ -1,8 +1,14 @@
 # Frontend Mapping
 
-Current clean-room frontend implementation lives in:
+## Current State
+- Canonical entry for new integration: `src/frontend/FrontendFacade.h`
+- Current implementation lives in:
+  - `src/parse`: lexer, parser, type system
+  - `src/codegen`: AST-to-IR lowering
 
-- `src/parse`: lexer, parser, type system
-- `src/codegen`: AST-to-IR lowering entrypoints
+## Boundary Rule
+- New top-level wiring should include frontend facade instead of raw parse/codegen paths.
 
-This directory is reserved as the canonical frontend namespace for future incremental refactors.
+## Next Steps
+- Introduce frontend-only tests and diagnostics under `src/frontend` namespace.
+- Migrate parse/codegen internals incrementally.

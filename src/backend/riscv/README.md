@@ -1,5 +1,13 @@
 # RISC-V Backend Mapping
 
-Current RV64 backend code is implemented in `src/rv`.
+## Current State
+- Canonical entry for new integration: `src/backend/riscv/BackendPasses.h`
+- RV64 implementation still lives in `src/rv`
 
-This directory marks the canonical target layout for future split-out.
+## Boundary Rule
+- New cross-module includes should reference `src/backend/riscv/*` first.
+- `src/rv/*` remains implementation detail during migration.
+
+## Next Steps
+- Keep dual-target wiring under backend adapters.
+- Migrate RV implementation files in small batches.
