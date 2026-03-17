@@ -377,7 +377,7 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       int l = std::max(0, def + 1);
       int r = std::min<int>(ops.size(), last);
       int callCount = callPrefix[r] - callPrefix[l];
-      spillWeight[op] += 72LL * localWeight * callCount;
+      spillWeight[op] += 64LL * localWeight * callCount;
     }
 
     // We use event-driven approach to optimize it into O(n log n + E).
