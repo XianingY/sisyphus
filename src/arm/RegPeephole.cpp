@@ -237,6 +237,79 @@ int RegAlloc::latePeephole(Op *funcOp) {
 
     auto next = op->nextOp();
     int offset = V(op);
+    if (isa<AddXIOp>(next) &&
+        op->getUses().size() == 1 &&
+        next->getUses().size() == 1 &&
+        next->has<RdAttr>() && next->has<RsAttr>() && next->has<IntAttr>() &&
+        RD(next) != Reg::sp &&
+        RS(next) == RD(op)) {
+      auto mem = next->nextOp();
+      int extra = V(next);
+      bool folded = false;
+      if (isa<LdrXOp>(mem)) {
+        int nextOffset = V(mem) + offset + extra;
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+          RS(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<LdrWOp>(mem)) {
+        int nextOffset = V(mem) + offset + extra;
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+          RS(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<LdrFOp>(mem)) {
+        int nextOffset = V(mem) + offset + extra;
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+          RS(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<LdrDOp>(mem)) {
+        int nextOffset = V(mem) + offset + extra;
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+          RS(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<StrXOp>(mem)) {
+        int nextOffset = V(mem) + offset + extra;
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+          RS2(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<StrWOp>(mem)) {
+        int nextOffset = V(mem) + offset + extra;
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+          RS2(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<StrFOp>(mem)) {
+        int nextOffset = V(mem) + offset + extra;
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+          RS2(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<StrDOp>(mem)) {
+        int nextOffset = V(mem) + offset + extra;
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+          RS2(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      }
+      if (folded) {
+        converted++;
+        next->erase();
+        op->erase();
+        return true;
+      }
+    }
 
     if (isa<MovROp>(next) && !next->atBack() &&
         op->getUses().size() == 1 &&
@@ -618,6 +691,40 @@ void RegAlloc::tidyup(Region *region) {
   region->updatePreds();
   for (auto [bb, v] : jumpTo)
     bb->erase();
+
+  // After lowering, combine sequential blocks into one.
+  // This helps eliminate branch chains left by earlier rewrites.
+  do {
+    changed = false;
+    const auto &bbs = region->getBlocks();
+    for (auto bb : bbs) {
+      if (bb->succs.size() != 1)
+        continue;
+
+      auto succ = *bb->succs.begin();
+      if (succ->preds.size() != 1)
+        continue;
+
+      auto term = bb->getLastOp();
+      if (isa<BOp>(term))
+        term->erase();
+
+      for (auto s : succ->succs) {
+        s->preds.erase(succ);
+        s->preds.insert(bb);
+        bb->succs.insert(s);
+      }
+      bb->succs.erase(succ);
+
+      auto ops = succ->getOps();
+      for (auto op : ops)
+        op->moveToEnd(bb);
+
+      succ->forceErase();
+      changed = true;
+      break;
+    }
+  } while (changed);
 
   // Now branches are still having both TargetAttr and ElseAttr.
   // Replace them (perform split when necessary), so that they only have one target.

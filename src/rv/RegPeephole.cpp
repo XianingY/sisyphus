@@ -142,6 +142,43 @@ int RegAlloc::latePeephole(Op *funcOp) {
 
     auto next = op->nextOp();
     int offset = V(op);
+    if (isa<AddiOp>(next) &&
+        op->getUses().size() == 1 &&
+        next->getUses().size() == 1 &&
+        next->has<RdAttr>() && next->has<RsAttr>() && next->has<IntAttr>() &&
+        RD(next) != Reg::sp &&
+        RS(next) == RD(op)) {
+      auto mem = next->nextOp();
+      int extra = V(next);
+      bool folded = false;
+      if (isa<LoadOp>(mem) && mem->has<RdAttr>() && mem->has<RsAttr>() && mem->has<IntAttr>() &&
+          RS(mem) == RD(next) && inRange12(V(mem) + offset + extra)) {
+        RS(mem) = RS(op);
+        V(mem) += offset + extra;
+        folded = true;
+      } else if (isa<FldOp>(mem) && mem->has<RdAttr>() && mem->has<RsAttr>() && mem->has<IntAttr>() &&
+                 RS(mem) == RD(next) && inRange12(V(mem) + offset + extra)) {
+        RS(mem) = RS(op);
+        V(mem) += offset + extra;
+        folded = true;
+      } else if (isa<StoreOp>(mem) && mem->has<RsAttr>() && mem->has<Rs2Attr>() && mem->has<IntAttr>() &&
+                 RS2(mem) == RD(next) && RS(mem) != RD(next) && inRange12(V(mem) + offset + extra)) {
+        RS2(mem) = RS(op);
+        V(mem) += offset + extra;
+        folded = true;
+      } else if (isa<FsdOp>(mem) && mem->has<RsAttr>() && mem->has<Rs2Attr>() && mem->has<IntAttr>() &&
+                 RS2(mem) == RD(next) && inRange12(V(mem) + offset + extra)) {
+        RS2(mem) = RS(op);
+        V(mem) += offset + extra;
+        folded = true;
+      }
+      if (folded) {
+        converted++;
+        next->erase();
+        op->erase();
+        return true;
+      }
+    }
     if (isa<LoadOp>(next) && next->has<RdAttr>() && next->has<RsAttr>() && next->has<IntAttr>() &&
         RS(next) == RD(op) && RD(next) == RD(op) && inRange12(V(next) + offset)) {
       converted++;
@@ -592,6 +629,40 @@ void RegAlloc::tidyup(Region *region) {
   } while (converted);
 
   legalizeLargeMemOffsets();
+
+  // A second CFG cleanup can expose more branch-to-next opportunities
+  // after late peephole and mem-offset legalization.
+  do {
+    changed = false;
+    const auto &bbs = region->getBlocks();
+    for (auto bb : bbs) {
+      if (bb->succs.size() != 1)
+        continue;
+
+      auto succ = *bb->succs.begin();
+      if (succ->preds.size() != 1)
+        continue;
+
+      auto term = bb->getLastOp();
+      if (isa<JOp>(term))
+        term->erase();
+
+      for (auto s : succ->succs) {
+        s->preds.erase(succ);
+        s->preds.insert(bb);
+        bb->succs.insert(s);
+      }
+      bb->succs.erase(succ);
+
+      auto ops = succ->getOps();
+      for (auto op : ops)
+        op->moveToEnd(bb);
+
+      succ->forceErase();
+      changed = true;
+      break;
+    }
+  } while (changed);
 
   // Also, eliminate useless JOp.
   runRewriter(funcOp, [&](JOp *op) {
