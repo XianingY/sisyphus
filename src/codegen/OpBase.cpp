@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <deque>
 #include <unordered_map>
+#include <unordered_set>
 
 using namespace sys;
 
@@ -511,22 +512,34 @@ void Region::erase() {
 }
 
 void Region::updatePreds() {
+  std::unordered_set<BasicBlock*> inRegion;
   for (auto bb : bbs) {
+    inRegion.insert(bb);
     bb->preds.clear();
     bb->succs.clear();
   }
 
+  auto addPred = [&](BasicBlock *from, BasicBlock *to) {
+    if (!from || !to)
+      return;
+    if (!inRegion.count(from) || !inRegion.count(to))
+      return;
+    to->preds.insert(from);
+  };
+
   for (auto bb : bbs) {
-    assert(bb->getOpCount() > 0);
+    if (bb->getOpCount() == 0)
+      continue;
+
     auto last = bb->getLastOp();
     if (last->has<TargetAttr>()) {
       auto target = last->get<TargetAttr>();
-      target->bb->preds.insert(bb);
+      addPred(bb, target->bb);
     }
 
     if (last->has<ElseAttr>()) {
       auto ifnot = last->get<ElseAttr>();
-      ifnot->bb->preds.insert(bb);
+      addPred(bb, ifnot->bb);
     }
   }
 

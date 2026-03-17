@@ -5,6 +5,9 @@
 using namespace sys;
 
 void InstSchedule::runImpl(BasicBlock *bb) {
+  if (!bb || bb->getOpCount() == 0)
+    return;
+
   // If there are local arrays, then there are probably initialization.
   // We'd like to keep those stores in order to achieve better cache performance.
   if (isa<AllocaOp>(bb->getFirstOp()))

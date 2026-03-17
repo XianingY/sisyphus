@@ -1,12 +1,52 @@
 #include "LoopPasses.h"
+#include <unordered_set>
 
 using namespace sys;
+
+namespace {
+
+bool isWellFormedLoop(LoopInfo *loop) {
+  if (!loop || !loop->header || !loop->header->getParent())
+    return false;
+
+  auto region = loop->header->getParent();
+  for (auto bb : loop->getBlocks()) {
+    if (!bb || bb->getParent() != region || bb->getOpCount() == 0)
+      return false;
+
+    auto phis = bb->getPhis();
+    for (auto phi : phis) {
+      if (phi->getOperandCount() != (int) phi->getAttrs().size())
+        return false;
+
+      std::unordered_set<BasicBlock*> seen;
+      for (auto attr : phi->getAttrs()) {
+        if (!isa<FromAttr>(attr))
+          return false;
+        auto from = FROM(attr);
+        if (!from || from->getParent() != region)
+          return false;
+        if (seen.count(from))
+          return false;
+        seen.insert(from);
+      }
+    }
+  }
+
+  return true;
+}
+
+}
 
 // Each basic block might require a different value (because they are dominated by different exits).
 // This function finds which value is the required one.
 Op *getValueFor(BasicBlock *bb, LoopInfo *info, std::map<BasicBlock*, Op*> &phiMap,
                 Op *fallback, std::set<BasicBlock*> &visiting) {
   if (!bb)
+    return fallback;
+  if (!info || !info->header || bb->getParent() != info->header->getParent())
+    return fallback;
+  if (bb->getOpCount() == 0)
     return fallback;
 
   if (phiMap.count(bb))
@@ -51,6 +91,9 @@ Op *getValueFor(BasicBlock *bb, LoopInfo *info, std::map<BasicBlock*, Op*> &phiM
 void CanonicalizeLoop::canonicalize(LoopInfo *loop) {
   for (auto subloop : loop->subloops)
     canonicalize(subloop);
+
+  if (!isWellFormedLoop(loop))
+    return;
 
   Builder builder;
 

@@ -1,8 +1,52 @@
 #include "CleanupPasses.h"
 #include "Analysis.h"
 #include "../codegen/Attrs.h"
+#include <unordered_set>
 
 using namespace sys;
+
+namespace {
+
+bool normalizePhiIncoming(Region *region) {
+  bool changed = false;
+
+  for (auto bb : region->getBlocks()) {
+    auto phis = bb->getPhis();
+    for (auto phi : phis) {
+      while (phi->getOperandCount() > (int) phi->getAttrs().size()) {
+        phi->removeOperand(phi->getOperandCount() - 1);
+        changed = true;
+      }
+      while ((int) phi->getAttrs().size() > phi->getOperandCount()) {
+        phi->removeAttribute((int) phi->getAttrs().size() - 1);
+        changed = true;
+      }
+
+      std::unordered_set<BasicBlock*> seen;
+      for (int i = phi->getOperandCount() - 1; i >= 0; i--) {
+        auto attr = phi->getAttrs()[i];
+        bool keep = isa<FromAttr>(attr);
+        BasicBlock *from = keep ? FROM(attr) : nullptr;
+        if (keep) {
+          if (!from || from->getParent() != region || !bb->preds.count(from) || seen.count(from))
+            keep = false;
+        }
+
+        if (!keep) {
+          phi->removeOperand(i);
+          phi->removeAttribute(i);
+          changed = true;
+          continue;
+        }
+        seen.insert(from);
+      }
+    }
+  }
+
+  return changed;
+}
+
+}
 
 std::map<std::string, int> DCE::stats() {
   return {
@@ -150,6 +194,10 @@ void DCE::run() {
     for (auto func : funcs) {
       auto region = func->getRegion();
       region->updatePreds();
+      if (normalizePhiIncoming(region)) {
+        changed = true;
+        region->updatePreds();
+      }
       std::set<BasicBlock*> toRemove;
       auto entry = region->getFirstBlock();
 
@@ -215,6 +263,12 @@ void DCE::run() {
       // Do the real removal.
       for (auto bb : toRemove)
         bb->forceErase();
+
+      region->updatePreds();
+      if (normalizePhiIncoming(region)) {
+        changed = true;
+        region->updatePreds();
+      }
     }
   } while (changed);
 }

@@ -19,6 +19,23 @@ Rule modIncr("(mod (add x y) 'a)");
 Rule constDiv("(div x 'a)");
 Rule invarAdd("(addl x y)");
 
+Op *phiFromSafe(Op *phi, BasicBlock *bb) {
+  if (!phi || !bb)
+    return nullptr;
+
+  const auto &ops = phi->getOperands();
+  const auto &attrs = phi->getAttrs();
+  size_t count = std::min(ops.size(), attrs.size());
+  for (size_t i = 0; i < count; i++) {
+    auto attr = attrs[i];
+    if (!isa<FromAttr>(attr))
+      continue;
+    if (FROM(attr) == bb)
+      return ops[i].defining;
+  }
+  return nullptr;
+}
+
 }
 
 void SCEV::rewrite(BasicBlock *bb, LoopInfo *info) {
@@ -280,14 +297,19 @@ void SCEV::runImpl(LoopInfo *info) {
   std::set<std::pair<Op*, int>> divs;
   Builder builder;
   for (auto phi : phis) {
-    auto latchval = Op::getPhiFrom(phi, latch);
+    auto latchval = phiFromSafe(phi, latch);
+    if (!latchval)
+      continue;
     // Try to match (add x 'a).
     if (constIncr.match(latchval, { { "x", phi } })) {
       auto v = constIncr.extract("'a");
       phi->add<IncreaseAttr>(V(v));
 
       // Also find out the start value.
-      start[phi] = Op::getPhiFrom(phi, preheader);
+      auto startVal = phiFromSafe(phi, preheader);
+      if (!startVal)
+        continue;
+      start[phi] = startVal;
       // If the latchval is used more than once (elsewhere than the phi),
       // We also record it's startval: phi + step.
       if (latchval->getUses().size() > 1) {
@@ -316,7 +338,9 @@ void SCEV::runImpl(LoopInfo *info) {
   // See if this phi comes from `x + <IncreaseAttr { a }>,
   // If so, this is <IncreaseAttr { 0, a }>.
   for (auto phi : phis) {
-    auto latchval = Op::getPhiFrom(phi, latch);
+    auto latchval = phiFromSafe(phi, latch);
+    if (!latchval)
+      continue;
     if (isa<AddIOp>(latchval) || isa<AddLOp>(latchval)) {
       auto x = latchval->DEF(0);
       auto y = latchval->DEF(1);
@@ -370,12 +394,16 @@ void SCEV::runImpl(LoopInfo *info) {
   // std::cerr << info << "\n";
   for (auto phi : exit->getPhis()) {
     // std::cerr << "phi: " << phi;
-    exitlatch[Op::getPhiFrom(phi, latch)] = phi;
+    auto fromLatch = phiFromSafe(phi, latch);
+    if (fromLatch)
+      exitlatch[fromLatch] = phi;
   }
 
   // Factor out the modulus.
   for (auto phi : mods) {
-    auto mod = Op::getPhiFrom(phi, latch);
+    auto mod = phiFromSafe(phi, latch);
+    if (!mod)
+      continue;
     auto latchphi = exitlatch.count(mod) ? exitlatch[mod] : exitlatch[phi];
     if (!latchphi) {
       std::cerr << "warning: bad?\n";
@@ -445,17 +473,21 @@ void SCEV::discardIv(LoopInfo *info) {
   if (!stop || !stop->getParent()->dominates(preheader))
     return;
 
-  Op *candidate = nullptr, *step, *start;
+  Op *candidate = nullptr, *step = nullptr, *start = nullptr;
   // Try to identify a phi that also increases and is not the induction variable.
   for (auto phi : phis) {
     if (phi == iv)
       continue;
 
-    auto latchval = Op::getPhiFrom(phi, latch);
+    auto latchval = phiFromSafe(phi, latch);
+    if (!latchval)
+      continue;
     // Try to match (addl (x 'a)).
     if (constIncrL.match(latchval, { { "x", phi } })) {
       auto v = constIncrL.extract("'a");
-      start = Op::getPhiFrom(phi, preheader);
+      start = phiFromSafe(phi, preheader);
+      if (!start)
+        continue;
       candidate = phi;
       step = v;
     }
@@ -464,7 +496,9 @@ void SCEV::discardIv(LoopInfo *info) {
   if (!candidate)
     return;
 
-  auto after = Op::getPhiFrom(candidate, latch);
+  auto after = phiFromSafe(candidate, latch);
+  if (!after)
+    return;
   if (!after->getParent()->dominates(latch))
     return;
 
@@ -509,8 +543,11 @@ void SCEV::replaceAfter(LoopInfo *info) {
 
   std::unordered_map<Op*, Op*> exitlatch;
   auto exitphis = exit->getPhis();
-  for (auto phi : exitphis)
-    exitlatch[Op::getPhiFrom(phi, latch)] = phi;
+  for (auto phi : exitphis) {
+    auto fromLatch = phiFromSafe(phi, latch);
+    if (fromLatch)
+      exitlatch[fromLatch] = phi;
+  }
 
   auto start = info->getStart();
   auto stop = info->getStop();
@@ -546,10 +583,14 @@ void SCEV::replaceAfter(LoopInfo *info) {
   builder.setToBlockStart(interm);
 
   for (auto phi : phis) {
-    auto latchval = Op::getPhiFrom(phi, latch);
+    auto latchval = phiFromSafe(phi, latch);
+    if (!latchval)
+      continue;
     bool addl = isa<AddLOp>(latchval);
 
-    auto vstart = Op::getPhiFrom(phi, preheader);
+    auto vstart = phiFromSafe(phi, preheader);
+    if (!vstart)
+      continue;
     auto latchphi = exitlatch[latchval];
     if (!latchphi)
       continue;
