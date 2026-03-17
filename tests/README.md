@@ -1,10 +1,12 @@
 # Tests
 
 - `tests/smoke`: minimal dual-target compile regression cases
+- `tests/regression/frontend`: frontend correctness and CLI-guard regressions
 - Execute with:
 
 ```bash
 scripts/run_smoke.sh
+scripts/run_frontend_regressions.sh
 ```
 
 For batch compilation against a local SysY case directory:

@@ -656,7 +656,7 @@ ConstValue Parser::earlyFold(ASTNode *node) {
       case BinaryNode::Lt:
         return ConstValue(new int(l < r), {});
       case BinaryNode::Le:
-        return ConstValue(new int(l > r), {});
+        return ConstValue(new int(l <= r), {});
       }
     }
     
@@ -686,7 +686,7 @@ ConstValue Parser::earlyFold(ASTNode *node) {
     case BinaryNode::Lt:
       return ConstValue(new int(l < r), {});
     case BinaryNode::Le:
-      return ConstValue(new int(l > r), {});
+      return ConstValue(new int(l <= r), {});
     }
   }
 

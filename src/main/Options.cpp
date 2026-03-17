@@ -49,6 +49,13 @@ Options sys::parseArgs(int argc, char **argv) {
     }
     return (int) value;
   };
+  auto requireValue = [&](int i, const char *optname) -> const char * {
+    if (i + 1 >= argc) {
+      std::cerr << "error: " << optname << " requires value\n";
+      exit(1);
+    }
+    return argv[i + 1];
+  };
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--target") == 0) {
@@ -92,25 +99,25 @@ Options sys::parseArgs(int argc, char **argv) {
     }
 
     if (strcmp(argv[i], "--print-after") == 0) {
-      opts.printAfter = argv[i + 1];
+      opts.printAfter = requireValue(i, "--print-after");
       i++;
       continue;
     }
 
     if (strcmp(argv[i], "--print-before") == 0) {
-      opts.printBefore = argv[i + 1];
+      opts.printBefore = requireValue(i, "--print-before");
       i++;
       continue;
     }
     
     if (strcmp(argv[i], "--compare") == 0) {
-      opts.compareWith = argv[i + 1];
+      opts.compareWith = requireValue(i, "--compare");
       i++;
       continue;
     }
 
     if (strcmp(argv[i], "-i") == 0) {
-      opts.simulateInput = argv[i + 1];
+      opts.simulateInput = requireValue(i, "-i");
       i++;
       continue;
     }

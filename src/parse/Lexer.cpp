@@ -23,9 +23,15 @@ std::map<std::string, Token::Type> keywords = {
 
 Token Lexer::nextToken() {
   assert(loc < input.size());
+  auto has = [&](int delta = 0) -> bool {
+    return loc + delta < (int) input.size();
+  };
+  auto peekc = [&](int delta = 0) -> char {
+    return input[loc + delta];
+  };
 
   // Skip whitespace
-  while (loc < input.size() && std::isspace(input[loc])) {
+  while (loc < input.size() && std::isspace((unsigned char) input[loc])) {
     if (input[loc] == '\n')
       lineno++;
     loc++;
@@ -38,9 +44,10 @@ Token Lexer::nextToken() {
   char c = input[loc];
 
   // Identifiers and keywords
-  if (std::isalpha(c) || c == '_') {
+  if (std::isalpha((unsigned char) c) || c == '_') {
     std::string name;
-    while (loc < input.size() && (std::isalnum(input[loc]) || input[loc] == '_'))
+    while (loc < input.size() &&
+           (std::isalnum((unsigned char) input[loc]) || input[loc] == '_'))
       name += input[loc++];
 
     if (keywords.count(name))
@@ -56,16 +63,16 @@ Token Lexer::nextToken() {
   }
 
   // Integer/FP literals
-  if (std::isdigit(c) || c == '.') {
+  if (std::isdigit((unsigned char) c) || c == '.') {
     int start = loc;
     bool isFloat = false;
 
     if (c == '0') {
-      if (input[loc + 1] == 'x' || input[loc + 1] == 'X') {
+      if (has(1) && (peekc(1) == 'x' || peekc(1) == 'X')) {
         // Hexadecimal, skip '0x'
         loc += 2;
-        while (std::isxdigit(input[loc]) || input[loc] == '.') {
-          if (input[loc] == '.') {
+        while (has() && (std::isxdigit((unsigned char) peekc()) || peekc() == '.')) {
+          if (peekc() == '.') {
             // Already seen a '.' before. Shouldn't continue.
             if (isFloat)
               break;
@@ -76,14 +83,14 @@ Token Lexer::nextToken() {
         }
 
         // Try to read a 'p' for exponent.
-        if (input[loc] == 'p' || input[loc] == 'P') {
+        if (has() && (peekc() == 'p' || peekc() == 'P')) {
           isFloat = true;
           loc++;
 
-          if (input[loc] == '+' || input[loc] == '-')
+          if (has() && (peekc() == '+' || peekc() == '-'))
             loc++;
           
-          while (std::isdigit(input[loc])) 
+          while (has() && std::isdigit((unsigned char) peekc())) 
             loc++;
         }
 
@@ -96,8 +103,8 @@ Token Lexer::nextToken() {
     }
 
     // Now this is a normal decimal integer or FP.
-    while (std::isdigit(input[loc]) || input[loc] == '.') {
-      if (input[loc] == '.') {
+    while (has() && (std::isdigit((unsigned char) peekc()) || peekc() == '.')) {
+      if (peekc() == '.') {
         // Already seen a '.' before. Shouldn't continue.
         if (isFloat)
           break;
@@ -108,14 +115,14 @@ Token Lexer::nextToken() {
     }
 
     // Try to read an 'e' for exponent.
-    if (input[loc] == 'e' || input[loc] == 'E') {
+    if (has() && (peekc() == 'e' || peekc() == 'E')) {
       isFloat = true;
       loc++;
 
-      if (input[loc] == '+' || input[loc] == '-')
+      if (has() && (peekc() == '+' || peekc() == '-'))
         loc++;
       
-      while (std::isdigit(input[loc])) 
+      while (has() && std::isdigit((unsigned char) peekc())) 
         loc++;
     }
 
@@ -156,17 +163,21 @@ Token Lexer::nextToken() {
           if (input[loc] == '\n')
             return nextToken();
         }
+        return Token::End;
       }
       if (input[loc + 1] == '*') {
         // Skip '/*', and loop till we find '*/'.
         loc += 2;
         for (; loc < input.size(); loc++) {
-          if (input[loc] == '*' && input[loc + 1] == '/') {
+          if (input[loc] == '\n')
+            lineno++;
+          if (loc + 1 < input.size() && input[loc] == '*' && input[loc + 1] == '/') {
             // Skip '*/'.
             loc += 2;
             return nextToken();
           }
         }
+        return Token::End;
       }
       break;
     case '%': 

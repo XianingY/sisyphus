@@ -178,13 +178,13 @@ Type *Sema::infer(ASTNode *node) {
     auto retTy = cast<FunctionType>(currentFunc)->ret;
     if (isa<IntType>(retTy) && isa<FloatType>(ty)) {
       ret->node = new UnaryNode(UnaryNode::Float2Int, ret->node);
-      ret->node->type = ctx.create<FloatType>();
+      ret->node->type = ctx.create<IntType>();
       return ctx.create<VoidType>();
     }
 
     if (isa<FloatType>(retTy) && isa<IntType>(ty)) {
       ret->node = new UnaryNode(UnaryNode::Int2Float, ret->node);
-      ret->node->type = ctx.create<IntType>();
+      ret->node->type = ctx.create<FloatType>();
       return ctx.create<VoidType>();
     }
 
@@ -244,13 +244,13 @@ Type *Sema::infer(ASTNode *node) {
     auto rty = infer(assign->r);
     if (isa<IntType>(lty) && isa<FloatType>(rty)) {
       assign->r = new UnaryNode(UnaryNode::Float2Int, assign->r);
-      assign->r->type = ctx.create<FloatType>();
+      assign->r->type = ctx.create<IntType>();
       return ctx.create<VoidType>();
     }
 
     if (isa<FloatType>(lty) && isa<IntType>(rty)) {
       assign->r = new UnaryNode(UnaryNode::Int2Float, assign->r);
-      assign->r->type = ctx.create<IntType>();
+      assign->r->type = ctx.create<FloatType>();
       return ctx.create<VoidType>();
     }
 
@@ -365,12 +365,12 @@ Type *Sema::infer(ASTNode *node) {
 
     if (isa<FloatType>(baseTy) && isa<IntType>(valueTy)) {
       write->value = new UnaryNode(UnaryNode::Int2Float, write->value);
-      write->value->type = ctx.create<IntType>();
+      write->value->type = ctx.create<FloatType>();
     }
 
     if (isa<IntType>(baseTy) && isa<FloatType>(valueTy)) {
       write->value = new UnaryNode(UnaryNode::Float2Int, write->value);
-      write->value->type = ctx.create<FloatType>();
+      write->value->type = ctx.create<IntType>();
     }
 
     return node->type = ctx.create<VoidType>();
