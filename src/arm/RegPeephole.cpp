@@ -248,56 +248,60 @@ int RegAlloc::latePeephole(Op *funcOp) {
       bool folded = false;
       if (isa<LdrXOp>(mem)) {
         int nextOffset = V(mem) + offset + extra;
-        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<LdrWOp>(mem)) {
         int nextOffset = V(mem) + offset + extra;
-        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<LdrFOp>(mem)) {
         int nextOffset = V(mem) + offset + extra;
-        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<LdrDOp>(mem)) {
         int nextOffset = V(mem) + offset + extra;
-        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<StrXOp>(mem)) {
         int nextOffset = V(mem) + offset + extra;
-        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) &&
+            validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS2(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<StrWOp>(mem)) {
         int nextOffset = V(mem) + offset + extra;
-        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) &&
+            validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS2(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<StrFOp>(mem)) {
         int nextOffset = V(mem) + offset + extra;
-        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) &&
+            validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS2(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<StrDOp>(mem)) {
         int nextOffset = V(mem) + offset + extra;
-        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) &&
+            validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS2(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
@@ -318,56 +322,60 @@ int RegAlloc::latePeephole(Op *funcOp) {
       bool folded = false;
       if (isa<LdrXOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<LdrWOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<LdrFOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<LdrDOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<StrXOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) &&
+            validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS2(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<StrWOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) &&
+            validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS2(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<StrFOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) &&
+            validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS2(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<StrDOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) &&
+            validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS2(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
@@ -675,6 +683,8 @@ void RegAlloc::tidyup(Region *region) {
   } while (changed);
 
   for (auto bb : region->getBlocks()) { 
+    if (bb->getOpCount() == 0)
+      continue;
     auto term = bb->getLastOp();
     if (auto target = term->find<TargetAttr>()) {
       if (jumpTo.count(target->bb))
@@ -698,10 +708,14 @@ void RegAlloc::tidyup(Region *region) {
     changed = false;
     const auto &bbs = region->getBlocks();
     for (auto bb : bbs) {
+      if (bb->getOpCount() == 0)
+        continue;
       if (bb->succs.size() != 1)
         continue;
 
       auto succ = *bb->succs.begin();
+      if (!succ || succ == bb)
+        continue;
       if (succ->preds.size() != 1)
         continue;
 

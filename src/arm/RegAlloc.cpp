@@ -285,12 +285,20 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
     bbIndex[bb] = idx++;
   for (auto bb : region->getBlocks()) {
     int w = 1;
+    if (bb->getOpCount() == 0) {
+      bbWeight[bb] = w;
+      continue;
+    }
     auto term = bb->getLastOp();
     bool hasBackEdge = false;
-    if (auto target = term->find<TargetAttr>())
-      hasBackEdge = hasBackEdge || (bbIndex[target->bb] <= bbIndex[bb]);
-    if (auto ifnot = term->find<ElseAttr>())
-      hasBackEdge = hasBackEdge || (bbIndex[ifnot->bb] <= bbIndex[bb]);
+    if (auto target = term->find<TargetAttr>()) {
+      if (bbIndex.count(target->bb))
+        hasBackEdge = hasBackEdge || (bbIndex[target->bb] <= bbIndex[bb]);
+    }
+    if (auto ifnot = term->find<ElseAttr>()) {
+      if (bbIndex.count(ifnot->bb))
+        hasBackEdge = hasBackEdge || (bbIndex[ifnot->bb] <= bbIndex[bb]);
+    }
     if (hasBackEdge)
       w *= 8;
     for (auto op : bb->getOps()) {
@@ -394,7 +402,7 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       int l = std::max(0, def + 1);
       int r = std::min<int>(ops.size(), last);
       int callCount = callPrefix[r] - callPrefix[l];
-      spillWeight[op] += 72LL * localWeight * callCount;
+      spillWeight[op] += 64LL * localWeight * callCount;
     }
 
     // We use event-driven approach to optimize it into O(n log n + E).
