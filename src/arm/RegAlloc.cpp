@@ -60,6 +60,55 @@ bool fpreg(Value::Type ty) {
   return ty == Value::f32 || ty == Value::f128 || ty == Value::i128;
 }
 
+bool fitsAddImm12(int imm) {
+  return imm >= -4095 && imm <= 4095;
+}
+
+bool fitsMemImm14(int imm) {
+  return imm >= 0 && imm < 16384;
+}
+
+void materializeSpAddr(Builder &builder, Reg tmp, int offset) {
+  if (fitsAddImm12(offset)) {
+    builder.create<AddXIOp>({ RDC(tmp), RSC(Reg::sp), new IntAttr(offset) });
+    return;
+  }
+  builder.create<MovIOp>({ RDC(tmp), new IntAttr(offset) });
+  builder.create<AddXOp>({ RDC(tmp), RSC(tmp), RS2C(Reg::sp) });
+}
+
+void emitStackStore(Builder &builder, Reg src, bool fp, int offset, Reg addrTmp) {
+  if (fitsMemImm14(offset)) {
+    if (fp)
+      builder.create<StrFOp>({ RSC(src), RS2C(Reg::sp), new IntAttr(offset) });
+    else
+      builder.create<StrXOp>({ RSC(src), RS2C(Reg::sp), new IntAttr(offset) });
+    return;
+  }
+
+  materializeSpAddr(builder, addrTmp, offset);
+  if (fp)
+    builder.create<StrFOp>({ RSC(src), RS2C(addrTmp), new IntAttr(0) });
+  else
+    builder.create<StrXOp>({ RSC(src), RS2C(addrTmp), new IntAttr(0) });
+}
+
+void emitStackLoad(Builder &builder, Reg dst, bool fp, int offset, Reg addrTmp) {
+  if (fitsMemImm14(offset)) {
+    if (fp)
+      builder.create<LdrFOp>({ RDC(dst), RSC(Reg::sp), new IntAttr(offset) });
+    else
+      builder.create<LdrXOp>({ RDC(dst), RSC(Reg::sp), new IntAttr(offset) });
+    return;
+  }
+
+  materializeSpAddr(builder, addrTmp, offset);
+  if (fp)
+    builder.create<LdrFOp>({ RDC(dst), RSC(addrTmp), new IntAttr(0) });
+  else
+    builder.create<LdrXOp>({ RDC(dst), RSC(addrTmp), new IntAttr(0) });
+}
+
 }
 
 std::map<std::string, int> RegAlloc::stats() {
@@ -1003,12 +1052,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
         builder.setAfterOp(op);
         if (offset < delta)
           builder.create<FmovXOp>({ RDC(Reg(delta - offset)), RSC(reg) });
-        else if (offset < 16384) {
-          if (fp)
-            builder.create<StrFOp>({ RSC(reg), RS2C(Reg::sp), new IntAttr(offset) });
-          else
-            builder.create<StrXOp>({ RSC(reg), RS2C(Reg::sp), new IntAttr(offset) });
-        } else assert(false);
+        else
+          emitStackStore(builder, reg, fp, offset, spillReg2);
         op->add<RdAttr>(reg);
       }
 
@@ -1026,12 +1071,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
           builder.create<AdrOp>({ RDC(reg), new NameAttr(NAME(ref)) });
         else if (offset < delta)
           builder.create<FmovDOp>({ RDC(reg), RSC(Reg(delta - offset)) });
-        else if (offset < 16384) {
-          if (fp)
-            builder.create<LdrFOp>({ RDC(reg), RSC(Reg::sp), new IntAttr(offset) });
-          else
-            builder.create<LdrXOp>({ RDC(reg), RSC(Reg::sp), new IntAttr(offset) });
-        } else assert(false);
+        else
+          emitStackLoad(builder, reg, fp, offset, spillReg2);
         op->add<RsAttr>(reg);
       }
 
@@ -1048,12 +1089,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
           builder.create<AdrOp>({ RDC(reg), new NameAttr(NAME(ref)) });
         else if (offset < delta)
           builder.create<FmovDOp>({ RDC(reg), RSC(Reg(delta - offset)) });
-        else if (offset < 16384) {
-          if (fp)
-            builder.create<LdrFOp>({ RDC(reg), RSC(Reg::sp), new IntAttr(offset) });
-          else
-            builder.create<LdrXOp>({ RDC(reg), RSC(Reg::sp), new IntAttr(offset) });
-        } else assert(false);
+        else
+          emitStackLoad(builder, reg, fp, offset, spillReg3);
         op->add<Rs2Attr>(reg);
       }
 
@@ -1070,12 +1107,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
           builder.create<AdrOp>({ RDC(reg), new NameAttr(NAME(ref)) });
         else if (offset < delta)
           builder.create<FmovDOp>({ RDC(reg), RSC(Reg(delta - offset)) });
-        else if (offset < 16384) {
-          if (fp)
-            builder.create<LdrFOp>({ RDC(reg), RSC(Reg::sp), new IntAttr(offset) });
-          else
-            builder.create<LdrXOp>({ RDC(reg), RSC(Reg::sp), new IntAttr(offset) });
-        } else assert(false);
+        else
+          emitStackLoad(builder, reg, fp, offset, spillReg2);
         op->add<Rs3Attr>(reg);
       }
     }

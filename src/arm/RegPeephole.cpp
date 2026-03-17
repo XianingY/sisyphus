@@ -784,6 +784,55 @@ void load(Builder builder, const std::vector<Reg> &regs, int offset) {
   }
 }
 
+namespace {
+
+bool fitsAddImm12(int imm) {
+  return imm >= -4095 && imm <= 4095;
+}
+
+bool fitsMemImm14(int imm) {
+  return imm >= 0 && imm < 16384;
+}
+
+void emitSpAdjust(Builder &builder, int delta) {
+  while (delta != 0) {
+    int step = delta;
+    if (step > 4095)
+      step = 4095;
+    if (step < -4095)
+      step = -4095;
+    builder.create<AddXIOp>({ RDC(Reg::sp), RSC(Reg::sp), new IntAttr(step) });
+    delta -= step;
+  }
+}
+
+void materializeSpAddr(Builder &builder, Reg tmp, int offset) {
+  if (fitsAddImm12(offset)) {
+    builder.create<AddXIOp>({ RDC(tmp), RSC(Reg::sp), new IntAttr(offset) });
+    return;
+  }
+  builder.create<MovIOp>({ RDC(tmp), new IntAttr(offset) });
+  builder.create<AddXOp>({ RDC(tmp), RSC(tmp), RS2C(Reg::sp) });
+}
+
+void emitStackGetArgLoad(Builder &builder, Reg rd, bool fp, int offset) {
+  if (fitsMemImm14(offset)) {
+    if (fp)
+      builder.create<LdrFOp>({ RDC(rd), RSC(Reg::sp), new IntAttr(offset) });
+    else
+      builder.create<LdrXOp>({ RDC(rd), RSC(Reg::sp), new IntAttr(offset) });
+    return;
+  }
+
+  materializeSpAddr(builder, spillReg2, offset);
+  if (fp)
+    builder.create<LdrFOp>({ RDC(rd), RSC(spillReg2), new IntAttr(0) });
+  else
+    builder.create<LdrXOp>({ RDC(rd), RSC(spillReg2), new IntAttr(0) });
+}
+
+}
+
 void RegAlloc::proEpilogue(FuncOp *funcOp, bool isLeaf) {
   Builder builder;
   auto usedRegs = usedRegisters[funcOp];
@@ -848,8 +897,7 @@ void RegAlloc::proEpilogue(FuncOp *funcOp, bool isLeaf) {
   }
 
   runRewriter(funcOp, [&](GetArgOp *op) {
-    auto value = V(op);
-    assert(value >= 8);
+    assert(V(op) >= 8);
 
     // `sp + offset` is the base pointer.
     // We read past the base pointer (starting from 0):
@@ -860,11 +908,11 @@ void RegAlloc::proEpilogue(FuncOp *funcOp, bool isLeaf) {
     int myoffset = offset + argOffsets[op];
     builder.setBeforeOp(op);
     bool fp = isFP(RD(op));
-
-    if (fp)
-      builder.replace<LdrFOp>(op, { RDC(RD(op)), RSC(Reg::sp), new IntAttr(myoffset) });
-    else
-      builder.replace<LdrXOp>(op, { RDC(RD(op)), RSC(Reg::sp), new IntAttr(myoffset) });
+    emitStackGetArgLoad(builder, RD(op), fp, myoffset);
+    auto created = op->prevOp();
+    if (created)
+      op->replaceAllUsesWith(created);
+    op->erase();
     return false;
   });
 
@@ -872,8 +920,9 @@ void RegAlloc::proEpilogue(FuncOp *funcOp, bool isLeaf) {
   // becomes
   //   addi <rd = sp> <rs = sp> <-4>
   runRewriter(funcOp, [&](SubSpOp *op) {
-    int offset = V(op);
-    builder.replace<AddXIOp>(op, { RDC(Reg::sp), RSC(Reg::sp), new IntAttr(-offset) });
+    builder.setBeforeOp(op);
+    emitSpAdjust(builder, -V(op));
+    op->erase();
     return true;
   });
 }

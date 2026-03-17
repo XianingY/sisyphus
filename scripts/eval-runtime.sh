@@ -234,7 +234,7 @@ compile_case() {
   fi
 }
 
-printf 'suite,case_id,target,opt,label,status,compare,pass,median_ms,warmup_ms,run1_ms,run2_ms,run3_ms,asm,exe,log\n' >"${CSV_OUT}"
+printf 'suite,case_id,target,opt,label,status,compare,pass,median_ms,warmup_ms,run1_ms,run2_ms,run3_ms,asm,exe,log,compile_status,asm_emit_status,link_status\n' >"${CSV_OUT}"
 
 asm_root="${RUNTIME_ROOT}/asm/${SUITE}/${LABEL}/${TARGET}-${OPT}"
 bin_root="${RUNTIME_ROOT}/bin/${SUITE}/${LABEL}/${TARGET}-${OPT}"
@@ -268,6 +268,9 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
 
   status="ok"
   compare_status="skip"
+  compile_status="not_run"
+  asm_emit_status="not_run"
+  link_status="not_run"
   pass=0
   warmup_ms=""
   run1_ms=""
@@ -293,14 +296,43 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
   echo "[case] ${case_id}" >"${log_path}"
   echo "[timeout] ${timeout_sec}s" >>"${log_path}"
   echo "[compile] ${src}" >>"${log_path}"
-  if ! compile_case "${src}" "${asm_path}" >>"${log_path}" 2>&1; then
-    status="compile_fail"
+  set +e
+  compile_case "${src}" "${asm_path}" >>"${log_path}" 2>&1
+  compile_rc=$?
+  set -e
+  if [[ "${compile_rc}" -ne 0 ]]; then
+    if [[ "${compile_rc}" -ge 128 ]]; then
+      status="compile_crash"
+      compile_status="crash"
+    else
+      status="compile_fail"
+      compile_status="fail"
+    fi
+    asm_emit_status="missing"
+  else
+    compile_status="ok"
+    if [[ -s "${asm_path}" ]]; then
+      asm_emit_status="ok"
+    elif [[ -f "${asm_path}" ]]; then
+      asm_emit_status="empty"
+    else
+      asm_emit_status="missing"
+      status="compile_fail"
+      compile_status="fail"
+    fi
   fi
 
   if [[ "${status}" == "ok" ]]; then
     echo "[link] ${asm_path}" >>"${log_path}"
-    if ! "${GCC_BIN}" -static "${asm_path}" "${ROOT_DIR}/runtime/sylib.c" -lm -o "${exe_path}" >>"${log_path}" 2>&1; then
+    set +e
+    "${GCC_BIN}" -static "${asm_path}" "${ROOT_DIR}/runtime/sylib.c" -lm -o "${exe_path}" >>"${log_path}" 2>&1
+    link_rc=$?
+    set -e
+    if [[ "${link_rc}" -ne 0 ]]; then
       status="link_fail"
+      link_status="fail"
+    else
+      link_status="ok"
     fi
   fi
 
@@ -400,10 +432,11 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
     fi
   fi
 
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "${SUITE}" "${case_id}" "${TARGET}" "${OPT}" "${LABEL}" \
     "${status}" "${compare_status}" "${pass}" "${median_ms}" "${warmup_ms}" \
     "${run1_ms}" "${run2_ms}" "${run3_ms}" "${asm_path}" "${exe_path}" "${log_path}" \
+    "${compile_status}" "${asm_emit_status}" "${link_status}" \
     >>"${CSV_OUT}"
 
   rm -rf "${tmp_dir}"

@@ -5,11 +5,38 @@ using namespace sys::arm;
 
 void LateLegalize::run() {
   Builder builder;
+  auto fitsAddImm12 = [](int imm) { return imm >= -4095 && imm <= 4095; };
   
   // ARM does not support `add x0, xzr, 1`.
   runRewriter([&](AddXIOp *op) {
     if (RS(op) == Reg::xzr)
       builder.replace<MovIOp>(op, { RDC(RD(op)), new IntAttr(V(op)) });
+
+    int imm = V(op);
+    if (!fitsAddImm12(imm)) {
+      builder.setBeforeOp(op);
+      Reg rd = RD(op);
+      Reg rs = RS(op);
+      int remain = imm;
+      int step = remain;
+      if (step > 4095)
+        step = 4095;
+      if (step < -4095)
+        step = -4095;
+      builder.create<AddXIOp>({ RDC(rd), RSC(rs), new IntAttr(step) });
+      remain -= step;
+      while (remain != 0) {
+        step = remain;
+        if (step > 4095)
+          step = 4095;
+        if (step < -4095)
+          step = -4095;
+        builder.create<AddXIOp>({ RDC(rd), RSC(rd), new IntAttr(step) });
+        remain -= step;
+      }
+      op->erase();
+      return true;
+    }
     
     return false;
   });
