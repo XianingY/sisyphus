@@ -10,6 +10,12 @@ using namespace sys::exec;
   do { std::cerr << x << "\n"; std::abort(); } while (0)
 
 Interpreter::Interpreter(ModuleOp *module) {
+  if (const char *env = std::getenv("SISY_EXEC_STEP_LIMIT")) {
+    long long parsed = atoll(env);
+    if (parsed > 0)
+      stepLimit = (size_t) parsed;
+  }
+
   auto region = module->getRegion();
   auto block = region->getFirstBlock();
   for (auto op : block->getOps()) {
@@ -21,12 +27,14 @@ Interpreter::Interpreter(ModuleOp *module) {
         int *vp = new int[size];
         memcpy(vp, intArr->vi, size * 4);
         globalMap[name] = Value { .vi = (intptr_t) vp };
+        addRange(globalRanges, (intptr_t) vp, (size_t) SIZE(op));
       }
       if (auto fpArr = op->find<FloatArrayAttr>()) {
         float *vfp = new float[size];
         memcpy(vfp, fpArr->vf, size * 4);
         globalMap[name] = Value { .vi = (intptr_t) vfp };
         fpGlobals.insert(name);
+        addRange(globalRanges, (intptr_t) vfp, (size_t) SIZE(op));
       }
       continue;
     }
@@ -74,6 +82,37 @@ void Interpreter::store(Op *op, float v) {
   value[op] = Value { .vf = v };
 }
 
+void Interpreter::addRange(std::vector<MemoryRange> &ranges, intptr_t addr, size_t size) {
+  if (!addr || !size)
+    return;
+
+  uintptr_t begin = (uintptr_t) addr;
+  uintptr_t end = begin + size;
+  if (end < begin)
+    return;
+  ranges.push_back(MemoryRange { begin, end });
+}
+
+bool Interpreter::isAddressValid(intptr_t addr, size_t size) const {
+  if (!addr || !size)
+    return false;
+
+  uintptr_t begin = (uintptr_t) addr;
+  uintptr_t end = begin + size;
+  if (end < begin)
+    return false;
+
+  auto inRanges = [begin, end](const std::vector<MemoryRange> &ranges) {
+    for (const auto &range : ranges) {
+      if (begin >= range.begin && end <= range.end)
+        return true;
+    }
+    return false;
+  };
+
+  return inRanges(globalRanges) || inRanges(stackRanges);
+}
+
 size_t Interpreter::getAccessSize(Op *op, bool isLoad) {
   if (auto sizeAttr = op->find<SizeAttr>())
     return sizeAttr->value;
@@ -101,7 +140,7 @@ size_t Interpreter::getAccessSize(Op *op, bool isLoad) {
 // The registers are in fact 64-bit.
 #define EXEC_BINARY(Ty, sign) \
   case Ty::id: \
-    store(op, (intptr_t) ((eval(op->DEF(0)) sign eval(op->DEF(1))) & 0xffffffff)); \
+    store(op, (intptr_t) (int32_t) ((int32_t) eval(op->DEF(0)) sign (int32_t) eval(op->DEF(1)))); \
     break
 
 #define EXEC_BINARY_L(Ty, sign) \
@@ -121,7 +160,7 @@ size_t Interpreter::getAccessSize(Op *op, bool isLoad) {
 
 #define EXEC_UNARY(Ty, sign) \
   case Ty::id: \
-    store(op, (intptr_t) (sign eval(op->DEF()))); \
+    store(op, (intptr_t) (int32_t) (sign (int32_t) eval(op->DEF()))); \
     break
 
 #define EXEC_UNARY_F(Ty, sign) \
@@ -181,13 +220,9 @@ void Interpreter::exec(Op *op) {
 
   EXEC_UNARY_F(MinusFOp, -);
   case RShiftOp::id: {
-    auto x = eval(op->DEF(0));
-    auto y = eval(op->DEF(1));
-    if (x & 0x80000000)
-      // This is a negative 32-bit integer.
-      store(op, (intptr_t) ((int) x >> y));
-    else
-      store(op, x >> y);
+    auto x = (int32_t) eval(op->DEF(0));
+    auto y = (int32_t) eval(op->DEF(1));
+    store(op, (intptr_t) (int32_t) (x >> y));
     break;
   }
   case PhiOp::id: {
@@ -217,6 +252,13 @@ void Interpreter::exec(Op *op) {
     size_t size = getAccessSize(op, /*isLoad=*/true);
     bool fp = op->getResultType() == sys::Value::f32;
     intptr_t addr = eval(op->DEF());
+    if (!isAddressValid(addr, size)) {
+      if (fp)
+        store(op, 0.0f);
+      else
+        store(op, (intptr_t) 0);
+      break;
+    }
     if (fp)
       store(op, *(float*) addr);
     else if (size == 4)
@@ -235,6 +277,8 @@ void Interpreter::exec(Op *op) {
   case StoreOp::id: {
     size_t size = getAccessSize(op, /*isLoad=*/false);
     intptr_t addr = eval(op->DEF(1));
+    if (!isAddressValid(addr, size))
+      break;
     Op *def = op->DEF(0);
     bool fp = def->getResultType() == sys::Value::f32;
     if (fp)
@@ -317,15 +361,29 @@ Interpreter::Value Interpreter::applyExtern(const std::string &name, const std::
     outbuf << "\n";
     return Value();
   }
+  if (name == "putarray") {
+    int n = callArgs[0].vi;
+    int *ptr = (int*) callArgs[1].vi;
+    outbuf << n << ":";
+    for (int i = 0; i < n; i++)
+      outbuf << " " << ptr[i];
+    outbuf << "\n";
+    return Value();
+  }
   if (name == "_sysy_starttime" || name == "_sysy_stoptime")
     return Value();
   sys_unreachable("unknown extern function: " << name);
 }
 
 Interpreter::Value Interpreter::execf(Region *region, const std::vector<Value> &fnArgs) {
+  size_t frameMark = stackRanges.size();
   auto entry = region->getFirstBlock();
   ip = entry->getFirstOp();
-  while (!isa<ReturnOp>(ip)) {
+  while (!executionTimedOut && !isa<ReturnOp>(ip)) {
+    if (stepCount++ >= stepLimit) {
+      executionTimedOut = true;
+      break;
+    }
     switch (ip->opid) {
     case GotoOp::id: {
       auto dest = TARGET(ip);
@@ -343,7 +401,9 @@ Interpreter::Value Interpreter::execf(Region *region, const std::vector<Value> &
     // Note that we need the stack space to live long enough,
     // till we exit this interpreted function.
     case AllocaOp::id: {
-      void *space = alloca(SIZE(ip));
+      size_t size = SIZE(ip);
+      void *space = alloca(size);
+      addRange(stackRanges, (intptr_t) space, size);
       store(ip, (intptr_t) space);
       ip = ip->nextOp();
       break;
@@ -417,14 +477,18 @@ Interpreter::Value Interpreter::execf(Region *region, const std::vector<Value> &
     }
   }
   // Now `ip` is a ReturnOp.
-  if (ip->getOperandCount()) {
+  Value ret = Value { .vi = 0 };
+  if (!executionTimedOut && ip->getOperandCount()) {
     auto def = ip->DEF(0);
-    return value[def];
+    ret = value[def];
   }
-  return Value();
+  stackRanges.resize(frameMark);
+  return ret;
 }
 
 void Interpreter::run(std::istream &input) {
+  stepCount = 0;
+  executionTimedOut = false;
   inbuf << std::hexfloat << input.rdbuf();
   outbuf << std::hexfloat;
   auto exit = execf(fnMap["main"]->getRegion(), {});

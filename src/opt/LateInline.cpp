@@ -35,9 +35,17 @@ void LateInline::run() {
     // Don't inline overly large functions.
     auto fnRegion = func->getRegion();
     int opcount = 0;
+    int callcount = 0;
     for (auto bb : fnRegion->getBlocks())
-      opcount += bb->getOpCount();
+      for (auto op : bb->getOps()) {
+        opcount++;
+        if (isa<CallOp>(op))
+          callcount++;
+      }
     if (opcount >= threshold)
+      return false;
+    // Penalize call-dense callees near threshold to avoid code growth.
+    if (callcount > 0 && opcount * 5 >= threshold * 4)
       return false;
 
     // Don't inline recursive functions here.

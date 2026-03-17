@@ -707,7 +707,11 @@ void Unswitch::run() {
     loops = module->findAll<WhileOp>();
     for (auto loop : loops) {
       Op *branch = nullptr;
+      if (loop->getRegionCount() <= 1)
+        continue;
       auto region = loop->getRegion(1);
+      if (!region || region->getBlocks().empty())
+        continue;
       auto entry = region->getFirstBlock();
       for (auto op : entry->getOps()) {
         if (isa<IfOp>(op)) {

@@ -21,6 +21,20 @@ For semantic consistency check (`--compare`) and assembly-size proxy:
 ```bash
 scripts/compare.sh /path/to/cases riscv O1
 scripts/compare.sh /path/to/cases arm O1
+# include perf/* cases explicitly
+COMPARE_INCLUDE_PERF=1 scripts/compare.sh /path/to/cases riscv O1
+# per-case timeout and interpreter step budget
+COMPARE_TIMEOUT_SEC=60 SISY_EXEC_STEP_LIMIT=80000000 scripts/compare.sh /path/to/cases riscv O1
 scripts/asm-delta.sh /path/to/cases riscv
 scripts/eval-o1-matrix.sh /path/to/cases
+```
+
+For public suite sync/index and runtime evaluation:
+
+```bash
+scripts/suite-sync.sh --update
+scripts/suite-index.sh
+scripts/gen-reference-out.sh compiler-dev
+scripts/eval-runtime.sh open-functional riscv O1
+scripts/eval-vs-biframe.sh open-functional riscv O1
 ```

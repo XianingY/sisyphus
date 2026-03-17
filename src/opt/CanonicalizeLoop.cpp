@@ -4,15 +4,25 @@ using namespace sys;
 
 // Each basic block might require a different value (because they are dominated by different exits).
 // This function finds which value is the required one.
-Op *getValueFor(BasicBlock *bb, LoopInfo *info, std::map<BasicBlock*, Op*> &phiMap) {
+Op *getValueFor(BasicBlock *bb, LoopInfo *info, std::map<BasicBlock*, Op*> &phiMap,
+                Op *fallback, std::set<BasicBlock*> &visiting) {
+  if (!bb)
+    return fallback;
+
   if (phiMap.count(bb))
     return phiMap[bb];
+
+  // A malformed/cyclic idom chain should not crash compilation.
+  if (!visiting.insert(bb).second)
+    return fallback;
   
   // If the block is immediate-dominated by a block inside loop, 
   // then it must not be dominated by the exit block (note that exit block does not lie in a loop).
   // Otherwise we aren't sure; we can only recurse
-  if (!info->contains(bb->getIdom())) {
-    auto op = getValueFor(bb->getIdom(), info, phiMap);
+  auto idom = bb->getIdom();
+  if (!idom || !info->contains(idom)) {
+    auto op = getValueFor(idom, info, phiMap, fallback, visiting);
+    visiting.erase(bb);
     return phiMap[bb] = op;
   }
 
@@ -20,9 +30,20 @@ Op *getValueFor(BasicBlock *bb, LoopInfo *info, std::map<BasicBlock*, Op*> &phiM
   Builder builder;
   builder.setToBlockStart(bb);
   auto phi = builder.create<PhiOp>();
+  bool hasIncoming = false;
   for (auto pred : bb->preds) {
-    phi->pushOperand(getValueFor(pred, info, phiMap));
+    auto incoming = getValueFor(pred, info, phiMap, fallback, visiting);
+    if (!incoming)
+      continue;
+    phi->pushOperand(incoming);
     phi->add<FromAttr>(pred);
+    hasIncoming = true;
+  }
+
+  visiting.erase(bb);
+  if (!hasIncoming) {
+    phi->erase();
+    return phiMap[bb] = fallback;
   }
   return phiMap[bb] = phi;
 }
@@ -60,11 +81,17 @@ void CanonicalizeLoop::canonicalize(LoopInfo *loop) {
 
         builder.setToBlockStart(exit);
         auto phi = builder.create<PhiOp>();
+        bool hasIncoming = false;
         for (auto pred : exit->preds) {
           if (loop->contains(pred)) {
             phi->pushOperand(op);
             phi->add<FromAttr>(pred);
+            hasIncoming = true;
           }
+        }
+        if (!hasIncoming) {
+          phi->erase();
+          continue;
         }
         phiMap[exit] = phi;
         produced.insert(phi);
@@ -100,7 +127,10 @@ void CanonicalizeLoop::canonicalize(LoopInfo *loop) {
         if (loop->contains(parent) || produced.count(use))
           continue;
 
-        auto replace = getValueFor(parent, loop, phiMap);
+        std::set<BasicBlock*> visiting;
+        auto replace = getValueFor(parent, loop, phiMap, op, visiting);
+        if (!replace)
+          continue;
         use->replaceOperand(op, replace);
       }
     }

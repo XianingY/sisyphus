@@ -20,6 +20,7 @@ void Mem2Reg::runImpl(FuncOp *func) {
   domtree.clear();
 
   auto region = func->getRegion();
+  region->updateDoms();
   region->updateDomFront();
   domtree = getDomTree(region);
 
@@ -42,6 +43,16 @@ void Mem2Reg::runImpl(FuncOp *func) {
       if (isa<StoreOp>(use) && use->DEF(0) == alloca) {
         good = false;
         break;
+      }
+      // Promotion assumes store values are in SSA form and available on all paths
+      // reaching the store block. If the incoming value's defining block does not
+      // dominate the store block, keeping memory form is safer.
+      if (auto store = dyn_cast<StoreOp>(use)) {
+        auto valueDef = store->DEF(0);
+        if (valueDef && !store->getParent()->dominatedBy(valueDef->getParent())) {
+          good = false;
+          break;
+        }
       }
     }
 
@@ -139,7 +150,11 @@ void Mem2Reg::fillPhi(BasicBlock *bb, SymbolTable symbols) {
   for (auto succ : bb->succs) {
     auto phis = succ->getPhis();
     for (auto op : phis) {
-      auto alloca = phiFrom[cast<PhiOp>(op)];
+      auto phi = cast<PhiOp>(op);
+      auto it = phiFrom.find(phi);
+      if (it == phiFrom.end())
+        continue;
+      auto alloca = it->second;
 
       // We meet a PhiOp. This means the promoted register might hold value `symbols[alloca]` when it reaches here.
       // So this PhiOp should have that value as operand as well.
@@ -152,7 +167,10 @@ void Mem2Reg::fillPhi(BasicBlock *bb, SymbolTable symbols) {
         // Create a zero at the back of the incoming edge.
         auto term = bb->getLastOp();
         builder.setBeforeOp(term);
-        value = builder.create<IntOp>({ new IntAttr(0) });
+        bool fp = alloca->has<FPAttr>();
+        value = fp
+          ? (Value) builder.create<FloatOp>({ new FloatAttr(0) })
+          : (Value) builder.create<IntOp>({ new IntAttr(0) });
       } else
         value = symbols[alloca];
 

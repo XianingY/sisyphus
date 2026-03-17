@@ -271,7 +271,16 @@ void TCO::run() {
     if (func->get<ArgCountAttr>()->count >= 16)
       continue;
 
-    if (!runImpl(func))
-      runAdd(func);
+    if (!runImpl(func)) {
+      // The add-form rewrite can increase live values substantially on multi-recursive bodies
+      // (e.g., fib-like patterns), often hurting backend code quality.
+      int selfCalls = 0;
+      for (auto call : func->findAll<CallOp>()) {
+        if (NAME(call) == NAME(func))
+          selfCalls++;
+      }
+      if (selfCalls <= 1)
+        runAdd(func);
+    }
   }
 }

@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 <case_dir> [riscv|arm] [O0|O1] [extra compiler args...]"
+  echo "usage: $0 <case_dir> [riscv|arm] [O0|O1|O2] [extra compiler args...]"
   exit 1
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPILER="${ROOT_DIR}/build/compiler"
-CASE_DIR="$1"
+CASE_DIR="$(realpath -m "$1")"
 TARGET="${2:-riscv}"
 OPT="${3:-O1}"
 EXTRA_ARGS=("${@:4}")
@@ -25,12 +25,28 @@ if [[ ! -x "${COMPILER}" ]]; then
   exit 1
 fi
 
+if [[ ! -d "${CASE_DIR}" ]]; then
+  echo "case directory not found: ${CASE_DIR}"
+  exit 1
+fi
+
+safe_stem() {
+  local rel="$1"
+  rel="${rel//\//__}"
+  rel="${rel// /_}"
+  rel="${rel//$'\t'/_}"
+  printf "%s" "${rel%.*}"
+}
+
 count=0
-for f in "${CASE_DIR}"/*.sy; do
-  [[ -f "${f}" ]] || continue
-  base="$(basename "${f}" .sy)"
-  "${COMPILER}" "${f}" -S -o "${OUT_DIR}/${base}.s" "--target=${TARGET}" "-${OPT}" "${EXTRA_ARGS[@]}"
+while IFS= read -r -d '' f; do
+  rel="${f#${CASE_DIR}/}"
+  stem="$(safe_stem "${rel}")"
+  if ! "${COMPILER}" "${f}" -S -o "${OUT_DIR}/${stem}.s" "--target=${TARGET}" "-${OPT}" "${EXTRA_ARGS[@]}"; then
+    echo "[fail] ${rel}"
+    exit 1
+  fi
   count=$((count + 1))
-done
+done < <(find "${CASE_DIR}" -type f \( -name "*.sy" -o -name "*.c" \) -print0 | sort -z)
 
 echo "Compiled ${count} cases to ${OUT_DIR}"

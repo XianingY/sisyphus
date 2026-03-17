@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-  echo "usage: $0 <input.sy> <output.s> [riscv|arm] [O0|O1]"
+  echo "usage: $0 <input.sy> <output.s> [riscv|arm] [O0|O1|O2]"
   exit 1
 fi
 

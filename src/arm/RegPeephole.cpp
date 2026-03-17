@@ -63,6 +63,41 @@ using namespace sys;
 
 int RegAlloc::latePeephole(Op *funcOp) {
   Builder builder;
+  auto inSignedUnscaled = [](int x) { return x >= -256 && x <= 255; };
+  auto inUnsignedScaled = [](int x, int scale) {
+    return x >= 0 && x % scale == 0 && x / scale <= 4095;
+  };
+  auto validMemOffset = [&](Op *mem, int x) -> bool {
+    int scale = 0;
+    if (isa<LdrXOp>(mem) || isa<StrXOp>(mem) || isa<LdrDOp>(mem) || isa<StrDOp>(mem))
+      scale = 8;
+    if (isa<LdrWOp>(mem) || isa<StrWOp>(mem) || isa<LdrFOp>(mem) || isa<StrFOp>(mem))
+      scale = 4;
+    if (scale == 0)
+      return false;
+    return inSignedUnscaled(x) || inUnsignedScaled(x, scale);
+  };
+  auto readsReg = [](Op *op, Reg reg) -> bool {
+    return (op->has<RsAttr>() && RS(op) == reg) ||
+           (op->has<Rs2Attr>() && RS2(op) == reg) ||
+           (op->has<Rs3Attr>() && RS3(op) == reg) ||
+           (op->has<RegAttr>() && REG(op) == reg);
+  };
+  auto definesReg = [](Op *op, Reg reg) -> bool {
+    return op->has<RdAttr>() && RD(op) == reg;
+  };
+  auto canEraseAddrTmp = [&](AddXIOp *op, Op *folded) -> bool {
+    Reg rd = RD(op);
+    Op *cur = folded;
+    while (!cur->atBack()) {
+      cur = cur->nextOp();
+      if (readsReg(cur, rd))
+        return false;
+      if (definesReg(cur, rd))
+        return true;
+    }
+    return true;
+  };
 
   int converted = 0;
 
@@ -168,9 +203,113 @@ int RegAlloc::latePeephole(Op *funcOp) {
     return false;
   });
 
+  // Fold:
+  //   add xN, xM, #c0
+  //   ldr/str ..., [xN, #c1]
+  // into:
+  //   ldr/str ..., [xM, #c0+c1]
+  runRewriter(funcOp, [&](AddXIOp *op) {
+    if (op->atBack())
+      return false;
+    if (!op->has<RdAttr>() || !op->has<RsAttr>() || !op->has<IntAttr>())
+      return false;
+    // Never fold stack-pointer update into mem offsets.
+    // `sp` updates are frame-structure critical and cross-block/implicit uses
+    // (calls, ret paths) are not fully visible to this local peephole.
+    if (RD(op) == Reg::sp)
+      return false;
+
+    auto next = op->nextOp();
+    int offset = V(op);
+
+    if (isa<LdrXOp>(next)) {
+      int nextOffset = V(next) + offset;
+      if (RS(next) == RD(op) && validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
+        converted++;
+        RS(next) = RS(op);
+        V(next) = nextOffset;
+        op->erase();
+        return true;
+      }
+    }
+    if (isa<LdrWOp>(next)) {
+      int nextOffset = V(next) + offset;
+      if (RS(next) == RD(op) && validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
+        converted++;
+        RS(next) = RS(op);
+        V(next) = nextOffset;
+        op->erase();
+        return true;
+      }
+    }
+    if (isa<LdrFOp>(next)) {
+      int nextOffset = V(next) + offset;
+      if (RS(next) == RD(op) && validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
+        converted++;
+        RS(next) = RS(op);
+        V(next) = nextOffset;
+        op->erase();
+        return true;
+      }
+    }
+    if (isa<LdrDOp>(next)) {
+      int nextOffset = V(next) + offset;
+      if (RS(next) == RD(op) && validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
+        converted++;
+        RS(next) = RS(op);
+        V(next) = nextOffset;
+        op->erase();
+        return true;
+      }
+    }
+    if (isa<StrXOp>(next)) {
+      int nextOffset = V(next) + offset;
+      if (RS2(next) == RD(op) && RS(next) != RD(op) &&
+          validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
+        converted++;
+        RS2(next) = RS(op);
+        V(next) = nextOffset;
+        op->erase();
+        return true;
+      }
+    }
+    if (isa<StrWOp>(next)) {
+      int nextOffset = V(next) + offset;
+      if (RS2(next) == RD(op) && RS(next) != RD(op) &&
+          validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
+        converted++;
+        RS2(next) = RS(op);
+        V(next) = nextOffset;
+        op->erase();
+        return true;
+      }
+    }
+    if (isa<StrFOp>(next)) {
+      int nextOffset = V(next) + offset;
+      if (RS2(next) == RD(op) && validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
+        converted++;
+        RS2(next) = RS(op);
+        V(next) = nextOffset;
+        op->erase();
+        return true;
+      }
+    }
+    if (isa<StrDOp>(next)) {
+      int nextOffset = V(next) + offset;
+      if (RS2(next) == RD(op) && validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
+        converted++;
+        RS2(next) = RS(op);
+        V(next) = nextOffset;
+        op->erase();
+        return true;
+      }
+    }
+    return false;
+  });
+
   // Eliminate useless MovROp.
   runRewriter(funcOp, [&](MovROp *op) {
-    if (RD(op) == RS(op)) {
+    if (RD(op) == RS(op) || RD(op) == Reg::xzr) {
       converted++;
       op->erase();
       return true;
@@ -180,6 +319,51 @@ int RegAlloc::latePeephole(Op *funcOp) {
 
   runRewriter(funcOp, [&](FmovOp *op) {
     if (RD(op) == RS(op)) {
+      converted++;
+      op->erase();
+      return true;
+    }
+    return false;
+  });
+
+  runRewriter(funcOp, [&](MovIOp *op) {
+    if (RD(op) == Reg::xzr) {
+      converted++;
+      op->erase();
+      return true;
+    }
+    return false;
+  });
+
+  runRewriter(funcOp, [&](MovkOp *op) {
+    if (RD(op) == Reg::xzr) {
+      converted++;
+      op->erase();
+      return true;
+    }
+    return false;
+  });
+
+  runRewriter(funcOp, [&](MovnOp *op) {
+    if (RD(op) == Reg::xzr) {
+      converted++;
+      op->erase();
+      return true;
+    }
+    return false;
+  });
+
+  runRewriter(funcOp, [&](AddXIOp *op) {
+    if (RD(op) == Reg::xzr) {
+      converted++;
+      op->erase();
+      return true;
+    }
+    return false;
+  });
+
+  runRewriter(funcOp, [&](AddWIOp *op) {
+    if (RD(op) == Reg::xzr) {
       converted++;
       op->erase();
       return true;

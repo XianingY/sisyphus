@@ -5,6 +5,16 @@ using namespace sys;
 
 #define INT(op) isa<IntOp>(op)
 
+static bool insideStructuredRegion(Op *op) {
+  for (auto parent = op->getParentOp(); parent; parent = parent->getParentOp()) {
+    if (isa<FuncOp>(parent))
+      return false;
+    if (parent->getRegionCount() > 0)
+      return true;
+  }
+  return false;
+}
+
 static bool hasStoresTo(Op *op) {
   for (auto use : op->getUses()) {
     // This checks both the case when the address is stored elsewhere,
@@ -113,6 +123,11 @@ void EarlyConstFold::run() {
       Op *store = nullptr;
       bool good = true;
       for (auto use : uses) {
+        if (insideStructuredRegion(use)) {
+          good = false;
+          break;
+        }
+
         if (isa<LoadOp>(use))
           continue;
         

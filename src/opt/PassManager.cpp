@@ -6,6 +6,8 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 
 using namespace sys;
 
@@ -54,19 +56,38 @@ void PassManager::run() {
   pastFlatten = false;
   pastMem2Reg = false;
   inBackend = false;
+  bool compareEveryPass = false;
+  if (const char *env = std::getenv("SISY_COMPARE_EACH_PASS"))
+    compareEveryPass = env[0] && std::strcmp(env, "0") != 0;
   auto totalStart = std::chrono::steady_clock::now();
   double totalMs = 0.0;
 
   for (auto pass : passes) {
-    if (pass->name() == "flatten-cfg")
+    const auto &pname = pass->name();
+    bool transientIRPass =
+      pname == "range" ||
+      pname == "range-aware-fold" ||
+      pname == "splice";
+
+    if (pname == "flatten-cfg")
       pastFlatten = true;
-    if (pass->name() == "mem2reg")
+    if (pname == "mem2reg")
       pastMem2Reg = true;
-    if (pass->name() == "rv-lower" || pass->name() == "arm-lower")
+    if (pname == "rv-lower" || pname == "arm-lower")
       inBackend = true;
 
-    if (pass->name() == opts.printBefore) {
-      std::cerr << "===== Before " << pass->name() << " =====\n\n";
+    bool verifyThisPass = opts.verify && pastMem2Reg && !transientIRPass;
+    // Compare on the stabilized checkpoint before backend to avoid
+    // interpreter false positives and excessive N-pass replay cost.
+    bool compareThisPass = opts.compareWith.size() && pastFlatten && !inBackend &&
+      (compareEveryPass ? !transientIRPass : pname == "inst-schedule");
+    if (opts.o2) {
+      // O2 includes aggressive transformations with transient SSA/phi states.
+      verifyThisPass = opts.verify && pastMem2Reg && pname == "inst-schedule";
+    }
+
+    if (pname == opts.printBefore) {
+      std::cerr << "===== Before " << pname << " =====\n\n";
       module->dump(std::cerr);
       std::cerr << "\n\n";
     }
@@ -78,27 +99,31 @@ void PassManager::run() {
     auto passMs = std::chrono::duration<double, std::milli>(passEnd - passStart).count();
     totalMs += passMs;
 
-    if (opts.verbose || pass->name() == opts.printAfter) {
-      std::cerr << "===== After " << pass->name() << " =====\n\n";
+    if (opts.verbose || pname == opts.printAfter) {
+      std::cerr << "===== After " << pname << " =====\n\n";
       module->dump(std::cerr);
       std::cerr << "\n\n";
     }
 
     // Before mem2reg, we don't have phis.
     // Verify pass only checks phis; so no point running it before that.
-    if (opts.verify && pastMem2Reg) {
-      std::cerr << "checking " << pass->name() << "...";
+    if (verifyThisPass) {
+      std::cerr << "checking " << pname << "...";
       Verify(module).run();
       std::cerr << " passed\n";
     }
 
     // We can't simulate for backend.
     // Technically we have the capacity, but it's too much work.
-    if (opts.compareWith.size() && pastFlatten && !inBackend) {
-      std::cerr << "checking " << pass->name() << "\n";
+    if (compareThisPass) {
+      std::cerr << "checking " << pname << "\n";
       exec::Interpreter itp(module);
       std::stringstream buffer(input);
       itp.run(buffer);
+      if (itp.timedOut()) {
+        std::cerr << "compare timed out after step budget in pass: " << pname << "\n";
+        std::exit(1);
+      }
       std::string str = itp.out();
       // Strip output.
       while (str.size() && std::isspace(str.back()))
@@ -106,18 +131,18 @@ void PassManager::run() {
 
       if (str != truth) {
         std::cerr << "output mismatch:\n" << str << "\n";
-        std::cerr << "after pass: " << pass->name() << "\n";
-        assert(false);
+        std::cerr << "after pass: " << pname << "\n";
+        std::exit(1);
       }
       if (exitcode != itp.exitcode()) {
         std::cerr << "exit code mismatch:" << itp.exitcode() << " (expected " << exitcode << ")\n";
-        std::cerr << "after pass: " << pass->name() << "\n";
-        assert(false);
+        std::cerr << "after pass: " << pname << "\n";
+        std::exit(1);
       }
     }
     
     if (opts.stats) {
-      std::cerr << pass->name() << ":\n";
+      std::cerr << pname << ":\n";
 
       auto stats = pass->stats();
       if (!stats.size())
@@ -128,7 +153,7 @@ void PassManager::run() {
     }
 
     if (opts.dumpPassTiming)
-      std::cerr << "[pass-timing] " << pass->name() << " : " << passMs << " ms\n";
+      std::cerr << "[pass-timing] " << pname << " : " << passMs << " ms\n";
   }
 
   if (opts.dumpPassTiming) {

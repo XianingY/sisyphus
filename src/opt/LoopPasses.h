@@ -106,6 +106,7 @@ public:
 
 class LoopRotate : public Pass {
   int rotated = 0;
+  std::set<BasicBlock*> skipHeaders;
 
   void runImpl(LoopInfo *info);
 public:

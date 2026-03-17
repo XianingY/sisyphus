@@ -73,7 +73,7 @@ void initCorePipelineO0(sys::PassManager &pm) {
   pm.addPass<sys::InstSchedule>();
 }
 
-void initCorePipelineO1(sys::PassManager &pm) {
+void initCorePipelineO1(sys::PassManager &pm, bool aggressive) {
   pm.addPass<sys::MoveAlloca>();
 
   // ===== Structured control flow =====
@@ -92,10 +92,12 @@ void initCorePipelineO1(sys::PassManager &pm) {
   pm.addPass<sys::View>();
   pm.addPass<sys::LoopDCE>();
   pm.addPass<sys::TidyMemory>();
-  // if (opts.arm && (!opts.noLink || opts.o1)) // RV only has a single core.
+  // if (opts.arm && (!opts.noLink || opts.o1 || opts.o2)) // RV only has a single core.
   //   pm.addPass<sys::Parallelize>();
-  // pm.addPass<sys::Fusion>();
-  // pm.addPass<sys::Unswitch>();
+  if (aggressive) {
+    pm.addPass<sys::Fusion>();
+    pm.addPass<sys::Unswitch>();
+  }
   pm.addPass<sys::DCE>(/*elimBlocks=*/ false);
   pm.addPass<sys::ColumnMajor>();
   pm.addPass<sys::Parallelizable>();
@@ -124,6 +126,8 @@ void initCorePipelineO1(sys::PassManager &pm) {
   pm.addPass<sys::DSE>();
   pm.addPass<sys::DLE>();
   pm.addPass<sys::GVN>();
+  if (aggressive)
+    pm.addPass<sys::Reassociate>();
 
   // ===== Loop Optimization =====
 
@@ -151,6 +155,11 @@ void initCorePipelineO1(sys::PassManager &pm) {
   pm.addPass<sys::DSE>();
   pm.addPass<sys::DLE>();
   pm.addPass<sys::Select>();
+  if (aggressive) {
+    pm.addPass<sys::Range>();
+    pm.addPass<sys::RangeAwareFold>();
+    pm.addPass<sys::Splice>();
+  }
   pm.addPass<sys::RegularFold>();
   // pm.addPass<sys::Range>();
   // pm.addPass<sys::RangeAwareFold>();
@@ -172,6 +181,8 @@ void initCorePipelineO1(sys::PassManager &pm) {
   pm.addPass<sys::DLE>();
   pm.addPass<sys::DCE>();
   pm.addPass<sys::InlineStore>();
+  if (aggressive && opts.enableExperimental)
+    pm.addPass<sys::Cached>();
   if (opts.enableExperimental)
     pm.addPass<sys::SynthConstArray>();
   pm.addPass<sys::RegularFold>();
@@ -189,6 +200,13 @@ void initCorePipelineO1(sys::PassManager &pm) {
     pm.addPass<sys::GVN>();
     pm.addPass<sys::RegularFold>();
   }
+  if (aggressive) {
+    pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
+    pm.addPass<sys::LICM>();
+    pm.addPass<sys::SCEV>();
+    pm.addPass<sys::GVN>();
+    pm.addPass<sys::RegularFold>();
+  }
 
   // ===== Final Cleanup =====
 
@@ -197,9 +215,15 @@ void initCorePipelineO1(sys::PassManager &pm) {
   pm.addPass<sys::InstSchedule>();
 }
 
+void initCorePipelineO2(sys::PassManager &pm) {
+  initCorePipelineO1(pm, /*aggressive=*/ true);
+}
+
 void initPipeline(sys::PassManager &pm) {
-  if (opts.o1)
-    initCorePipelineO1(pm);
+  if (opts.o2)
+    initCorePipelineO2(pm);
+  else if (opts.o1)
+    initCorePipelineO1(pm, /*aggressive=*/ false);
   else
     initCorePipelineO0(pm);
 

@@ -245,6 +245,13 @@ bool ConstLoopUnroll::runImpl(LoopInfo *loop) {
   // Not a constant loop.
   if (unroll == -1)
     return false;
+  if (unroll <= 1)
+    return false;
+
+  // Guardrail: keep duplicated loop body within a bounded growth budget.
+  int estimatedGrowth = loopsize * (unroll - 1);
+  if (estimatedGrowth > 400)
+    return false;
 
   // Record the phi values at the beginning of `exit` that are taken from the latch.
   // Note that "taken from latch" doesn't necessarily mean it's in the loop.

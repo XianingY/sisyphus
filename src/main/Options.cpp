@@ -18,6 +18,7 @@ Options::Options() {
   dumpMidIR = false;
   emitIR = false;
   o1 = false;
+  o2 = false;
   arm = false;
   rv = false;
   verbose = false;
@@ -31,6 +32,9 @@ Options::Options() {
   bv = false;
   inlineThreshold = 200;
   lateInlineThreshold = 200;
+  inlineThresholdExplicit = false;
+  lateInlineThresholdExplicit = false;
+  loopRotateExplicit = false;
 }
 
 Options sys::parseArgs(int argc, char **argv) {
@@ -116,11 +120,13 @@ Options sys::parseArgs(int argc, char **argv) {
         exit(1);
       }
       opts.inlineThreshold = parsePositiveInt(argv[++i], "--inline-threshold");
+      opts.inlineThresholdExplicit = true;
       continue;
     }
 
     if (strncmp(argv[i], "--inline-threshold=", 19) == 0) {
       opts.inlineThreshold = parsePositiveInt(argv[i] + 19, "--inline-threshold");
+      opts.inlineThresholdExplicit = true;
       continue;
     }
 
@@ -130,11 +136,13 @@ Options sys::parseArgs(int argc, char **argv) {
         exit(1);
       }
       opts.lateInlineThreshold = parsePositiveInt(argv[++i], "--late-inline-threshold");
+      opts.lateInlineThresholdExplicit = true;
       continue;
     }
 
     if (strncmp(argv[i], "--late-inline-threshold=", 24) == 0) {
       opts.lateInlineThreshold = parsePositiveInt(argv[i] + 24, "--late-inline-threshold");
+      opts.lateInlineThresholdExplicit = true;
       continue;
     }
 
@@ -143,9 +151,19 @@ Options sys::parseArgs(int argc, char **argv) {
     PARSEOPT("--emit-ir", emitIR);
     PARSEOPT("--rv", rv);
     PARSEOPT("--arm", arm);
-    PARSEOPT("-O1", o1);
+    if (strcmp(argv[i], "-O1") == 0) {
+      opts.o1 = true;
+      opts.o2 = false;
+      continue;
+    }
+    if (strcmp(argv[i], "-O2") == 0) {
+      opts.o1 = false;
+      opts.o2 = true;
+      continue;
+    }
     if (strcmp(argv[i], "-O0") == 0) {
       opts.o1 = false;
+      opts.o2 = false;
       continue;
     }
     PARSEOPT("-S", noLink);
@@ -156,7 +174,16 @@ Options sys::parseArgs(int argc, char **argv) {
     PARSEOPT("--verify-ir", verify);
     PARSEOPT("--dump-pass-timing", dumpPassTiming);
     PARSEOPT("--enable-experimental", enableExperimental);
-    PARSEOPT("--disable-loop-rotate", disableLoopRotate);
+    if (strcmp(argv[i], "--disable-loop-rotate") == 0) {
+      opts.disableLoopRotate = true;
+      opts.loopRotateExplicit = true;
+      continue;
+    }
+    if (strcmp(argv[i], "--enable-loop-rotate") == 0) {
+      opts.disableLoopRotate = false;
+      opts.loopRotateExplicit = true;
+      continue;
+    }
     PARSEOPT("--disable-const-unroll", disableConstUnroll);
     PARSEOPT("--bv", bv);
     PARSEOPT("--sat", sat);
@@ -190,11 +217,18 @@ Options sys::parseArgs(int argc, char **argv) {
   if (opts.emitIR)
     opts.dumpMidIR = true;
 
+  if (!opts.inlineThresholdExplicit)
+    opts.inlineThreshold = opts.o2 ? 256 : 200;
+  if (!opts.lateInlineThresholdExplicit)
+    opts.lateInlineThreshold = opts.o2 ? 256 : 200;
+  if (!opts.loopRotateExplicit && (opts.o1 || opts.o2))
+    opts.disableLoopRotate = true;
+
   if (opts.inputFile.empty() && !opts.bv && !opts.sat) {
     std::cerr
-      << "usage: compiler <input.sy> -S -o <output.s> [-O0|-O1] [--target=riscv|arm]\n"
+      << "usage: compiler <input.sy> -S -o <output.s> [-O0|-O1|-O2] [--target=riscv|arm]\n"
       << "       [--inline-threshold=N] [--late-inline-threshold=N]\n"
-      << "       [--disable-loop-rotate] [--disable-const-unroll]\n"
+      << "       [--disable-loop-rotate|--enable-loop-rotate] [--disable-const-unroll]\n"
       << "       compiler <input.sy> -S -o <output.s> --emit-ir --verify-ir\n";
     exit(1);
   }

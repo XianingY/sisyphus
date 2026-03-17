@@ -1,6 +1,9 @@
 build
 build-*
 tests/.out
+tests/external
+.runtime-tools
+.runtime-reports
 bin
 test/official
 test/temp

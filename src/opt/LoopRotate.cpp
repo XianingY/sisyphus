@@ -16,10 +16,20 @@ std::map<std::string, int> LoopRotate::stats() {
 }
 
 void LoopRotate::runImpl(LoopInfo *info) {
+  if (skipHeaders.count(info->header))
+    return;
+  if (info->latches.size() != 1)
+    return;
   if (!info->getInduction())
     return;
   if (info->exits.size() != 1)
     return;
+  for (auto bb : info->getBlocks()) {
+    for (auto op : bb->getOps()) {
+      if (isa<CallOp>(op))
+        return;
+    }
+  }
 
   auto exit = info->getExit();
 
@@ -137,8 +147,20 @@ void LoopRotate::run() {
   LoopAnalysis loop(module);
   loop.run();
   auto info = loop.getResult();
+  skipHeaders.clear();
 
   auto funcs = collectFuncs();
+  for (auto func : funcs) {
+    const auto &forest = info[func];
+    for (auto top : forest.getLoops()) {
+      std::vector<LoopInfo*> loops;
+      postorder(top, loops);
+      for (auto l : loops) {
+        if (l->latches.size() != 1 || l->exits.size() != 1)
+          skipHeaders.insert(l->header);
+      }
+    }
+  }
 
   // Make sure each loop have a single latch.
   // Similar to Canonicalize::run().

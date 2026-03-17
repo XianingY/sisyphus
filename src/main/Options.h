@@ -14,6 +14,7 @@ struct Options {
     option dumpMidIR : 1;
     option emitIR : 1;
     option o1 : 1;
+    option o2 : 1;
     option arm : 1;
     option rv : 1;
     option verbose : 1;
@@ -35,6 +36,9 @@ struct Options {
   std::string simulateInput;
   int inlineThreshold;
   int lateInlineThreshold;
+  bool inlineThresholdExplicit;
+  bool lateInlineThresholdExplicit;
+  bool loopRotateExplicit;
   
   Options();
 };

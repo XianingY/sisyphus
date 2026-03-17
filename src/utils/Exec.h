@@ -6,6 +6,8 @@
 #include <sstream>
 #include <map>
 #include <unordered_map>
+#include <vector>
+#include <cstddef>
 
 namespace sys::exec {
 
@@ -33,6 +35,12 @@ class Interpreter {
   std::map<std::string, Op*> fnMap;
   std::set<std::string> fpGlobals;
   std::map<std::string, Value> globalMap;
+  struct MemoryRange {
+    uintptr_t begin;
+    uintptr_t end;
+  };
+  std::vector<MemoryRange> globalRanges;
+  std::vector<MemoryRange> stackRanges;
 
   SymbolTable value;
   // Used for phi functions.
@@ -51,8 +59,13 @@ class Interpreter {
 
   Value applyExtern(const std::string &name, const std::vector<Value> &callArgs);
   size_t getAccessSize(Op *op, bool isLoad);
+  bool isAddressValid(intptr_t addr, size_t size) const;
+  void addRange(std::vector<MemoryRange> &ranges, intptr_t addr, size_t size);
 
   unsigned retcode;
+  size_t stepLimit = 20000000;
+  size_t stepCount = 0;
+  bool executionTimedOut = false;
   int *cache = nullptr;
   int cache_type = 0;
 
@@ -73,6 +86,7 @@ public:
   void useCache(cache_2 cache) { this->cache = (int*) cache; cache_type = 2; }
   std::string out() { return outbuf.str(); }
   int exitcode() { return retcode & 0xff; }
+  bool timedOut() const { return executionTimedOut; }
 };
 
 }

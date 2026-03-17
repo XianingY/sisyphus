@@ -26,12 +26,15 @@ calc_metrics() {
   local fib_delta=0
   local ltcmp_delta=0
 
-  for f in "${case_dir}"/*.sy; do
-    [[ -f "${f}" ]] || continue
-    local base
-    base="$(basename "${f}" .sy)"
-    local s0="${o0_dir}/${base}.s"
-    local s1="${o1_dir}/${base}.s"
+  while IFS= read -r -d '' f; do
+    local rel stem base s0 s1
+    rel="${f#${case_dir}/}"
+    stem="${rel//\//__}"
+    stem="${stem// /_}"
+    stem="${stem%.*}"
+    base="$(basename "${rel%.*}")"
+    s0="${o0_dir}/${stem}.s"
+    s1="${o1_dir}/${stem}.s"
     [[ -f "${s0}" && -f "${s1}" ]] || continue
 
     local l0 l1 delta
@@ -57,7 +60,7 @@ calc_metrics() {
         ;;
       esac
     fi
-  done
+  done < <(find "${case_dir}" -type f \( -name "*.sy" -o -name "*.c" \) -print0 | sort -z)
 
   echo "${regressed} ${positive_sum} ${trio_sum} ${break_delta} ${fib_delta} ${ltcmp_delta}"
 }
@@ -89,6 +92,8 @@ for line in "${configs[@]}"; do
   if [[ "${rotate}" == "off" ]]; then
     extra+=( "--disable-loop-rotate" )
     off_count=$((off_count + 1))
+  else
+    extra+=( "--enable-loop-rotate" )
   fi
   if [[ "${unroll}" == "off" ]]; then
     extra+=( "--disable-const-unroll" )
@@ -132,5 +137,5 @@ echo "BEST: ${id} inline=${inline} late=${late} rotate=${rotate} unroll=${unroll
 if (( regressed <= 1 && break_delta <= 1 && fib_delta <= 1 && ltcmp_delta <= 1 )); then
   echo "THRESHOLD: PASS (Regressed<=1 and break/fib/ltcmp <= +1)"
 else
-  echo "THRESHOLD: FAIL (keep default 200/200 with rotate+unroll on)"
+  echo "THRESHOLD: FAIL (keep default 200/200 with rotate off and unroll on)"
 fi

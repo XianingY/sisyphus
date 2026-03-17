@@ -59,6 +59,7 @@ using namespace sys;
   return true
 int RegAlloc::latePeephole(Op *funcOp) {
   Builder builder;
+  auto inRange12 = [](int x) { return x > -2048 && x < 2048; };
 
   int converted = 0;
 
@@ -97,6 +98,38 @@ int RegAlloc::latePeephole(Op *funcOp) {
       return false;
     }
     
+    return false;
+  });
+
+  // Fold:
+  //   addi rd, rs, c0
+  //   lw/ld rd, c1(rd)
+  // into:
+  //   lw/ld rd, c0+c1(rs)
+  runRewriter(funcOp, [&](AddiOp *op) {
+    if (op->atBack())
+      return false;
+    if (!op->has<RdAttr>() || !op->has<RsAttr>() || !op->has<IntAttr>())
+      return false;
+
+    auto next = op->nextOp();
+    int offset = V(op);
+    if (isa<LoadOp>(next) && next->has<RdAttr>() && next->has<RsAttr>() && next->has<IntAttr>() &&
+        RS(next) == RD(op) && RD(next) == RD(op) && inRange12(V(next) + offset)) {
+      converted++;
+      RS(next) = RS(op);
+      V(next) += offset;
+      op->erase();
+      return true;
+    }
+    if (isa<FldOp>(next) && next->has<RdAttr>() && next->has<RsAttr>() && next->has<IntAttr>() &&
+        RS(next) == RD(op) && RD(next) == RD(op) && inRange12(V(next) + offset)) {
+      converted++;
+      RS(next) = RS(op);
+      V(next) += offset;
+      op->erase();
+      return true;
+    }
     return false;
   });
 
@@ -167,7 +200,7 @@ int RegAlloc::latePeephole(Op *funcOp) {
 
   // Eliminate useless MvOp.
   runRewriter(funcOp, [&](MvOp *op) {
-    if (RD(op) == RS(op)) {
+    if (RD(op) == RS(op) || RD(op) == Reg::zero) {
       converted++;
       op->erase();
       return true;
@@ -190,6 +223,24 @@ int RegAlloc::latePeephole(Op *funcOp) {
 
   runRewriter(funcOp, [&](FmvOp *op) {
     if (RD(op) == RS(op)) {
+      converted++;
+      op->erase();
+      return true;
+    }
+    return false;
+  });
+
+  runRewriter(funcOp, [&](LiOp *op) {
+    if (RD(op) == Reg::zero) {
+      converted++;
+      op->erase();
+      return true;
+    }
+    return false;
+  });
+
+  runRewriter(funcOp, [&](AddiOp *op) {
+    if (RD(op) == Reg::zero) {
       converted++;
       op->erase();
       return true;
