@@ -1,248 +1,19 @@
 #include "Options.h"
+#include "PipelineProfiles.h"
 #include <fstream>
 #include <sstream>
+#include <cstdlib>
+#include <cstring>
 
 #include "../parse/Parser.h"
 #include "../parse/Sema.h"
 #include "../codegen/CodeGen.h"
 #include "../opt/PassManager.h"
-#include "../opt/Passes.h"
-#include "../opt/LoopPasses.h"
-#include "../opt/CleanupPasses.h"
-#include "../opt/LowerPasses.h"
-#include "../opt/SMTPasses.h"
-#include "../opt/Analysis.h"
-#include "../pre-opt/PrePasses.h"
-#include "../pre-opt/PreLoopPasses.h"
-#include "../pre-opt/PreAnalysis.h"
-#include "../arm/ArmPasses.h"
-#include "../arm/ArmLoopPasses.h"
-#include "../rv/RvPasses.h"
-#include "../rv/RvDupPasses.h"
 #include "../utils/smt/SMT.h"
 
 using namespace smt;
 
 sys::Options opts;
-
-void initArmPipeline(sys::PassManager &pm) {
-  using namespace sys::arm;
-
-  pm.addPass<Lower>();
-  pm.addPass<StrengthReduct>();
-  pm.addPass<InstCombine>();
-  pm.addPass<ArmDCE>();
-  pm.addPass<sys::GVN>();
-  pm.addPass<PostIncr>();
-  pm.addPass<ArmDCE>();
-  pm.addPass<RegAlloc>();
-  pm.addPass<LateLegalize>();
-  pm.addPass<Dump>(opts.outputFile);
-}
-
-void initRvPipeline(sys::PassManager &pm) {
-  using namespace sys::rv;
-
-  pm.addPass<Lower>();
-  pm.addPass<StrengthReduct>();
-  pm.addPass<InstCombine>();
-  pm.addPass<RvDCE>();
-  pm.addPass<sys::GVN>();
-  pm.addPass<RegAlloc>();
-  pm.addPass<Dump>(opts.outputFile);
-}
-
-void initCorePipelineO0(sys::PassManager &pm) {
-  pm.addPass<sys::MoveAlloca>();
-
-  // O0: keep only canonicalization + correctness-preserving simplification.
-  pm.addPass<sys::EarlyConstFold>(/*beforePureness=*/ true);
-  pm.addPass<sys::Pureness>();
-  pm.addPass<sys::EarlyConstFold>(/*beforePureness=*/ false);
-  pm.addPass<sys::RaiseToFor>();
-  pm.addPass<sys::DCE>(/*elimBlocks=*/ false);
-  pm.addPass<sys::Lower>();
-
-  pm.addPass<sys::FlattenCFG>();
-  pm.addPass<sys::Mem2Reg>();
-  pm.addPass<sys::RegularFold>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::SimplifyCFG>();
-  pm.addPass<sys::Select>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::InstSchedule>();
-}
-
-void initCorePipelineO1(sys::PassManager &pm, bool aggressive) {
-  const bool enableO2Experimental = aggressive && !opts.disableO2Experimental;
-
-  pm.addPass<sys::MoveAlloca>();
-
-  // ===== Structured control flow =====
-
-  pm.addPass<sys::AtMostOnce>();
-  pm.addPass<sys::Localize>(/*beforeFlattenCFG=*/ true);
-  pm.addPass<sys::EarlyConstFold>(/*beforePureness=*/ true);
-  pm.addPass<sys::Pureness>();
-  pm.addPass<sys::EarlyConstFold>(/*beforePureness=*/ false);
-  pm.addPass<sys::TCO>();
-  pm.addPass<sys::Remerge>();
-  pm.addPass<sys::RaiseToFor>();
-  pm.addPass<sys::DCE>(/*elimBlocks=*/ false);
-  pm.addPass<sys::EarlyInline>();
-  pm.addPass<sys::RegularFold>();
-  pm.addPass<sys::View>();
-  pm.addPass<sys::LoopDCE>();
-  pm.addPass<sys::TidyMemory>();
-  // if (opts.arm && (!opts.noLink || opts.o1 || opts.o2)) // RV only has a single core.
-  //   pm.addPass<sys::Parallelize>();
-  if (aggressive) {
-    pm.addPass<sys::Fusion>();
-    pm.addPass<sys::Unswitch>();
-  }
-  pm.addPass<sys::DCE>(/*elimBlocks=*/ false);
-  pm.addPass<sys::ColumnMajor>();
-  pm.addPass<sys::Parallelizable>();
-  pm.addPass<sys::LoopDCE>();
-  // pm.addPass<sys::Unroll>(); // Unrolling doesn't help.
-  pm.addPass<sys::Lower>();
-
-  // ===== Flattened CFG =====
-
-  pm.addPass<sys::FlattenCFG>();
-  pm.addPass<sys::GVN>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::Inline>(/*inlineThreshold=*/ opts.inlineThreshold);
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::Localize>(/*beforeFlattenCFG=*/ false);
-  pm.addPass<sys::Globalize>();
-
-  // ===== Mem2Reg =====
-
-  pm.addPass<sys::Mem2Reg>();
-  pm.addPass<sys::Alias>();
-  pm.addPass<sys::RegularFold>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::DAE>();
-  pm.addPass<sys::Alias>();
-  pm.addPass<sys::DSE>();
-  pm.addPass<sys::DLE>();
-  pm.addPass<sys::GVN>();
-  if (aggressive)
-    pm.addPass<sys::Reassociate>();
-
-  // ===== Loop Optimization =====
-
-  pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
-  if (!opts.disableLoopRotate)
-    pm.addPass<sys::LoopRotate>();
-  pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ false);
-  pm.addPass<sys::LICM>();
-  if (!opts.disableConstUnroll)
-    pm.addPass<sys::ConstLoopUnroll>();
-  pm.addPass<sys::SCEV>();
-  pm.addPass<sys::AggressiveDCE>();
-  if (opts.arm) // RV doesn't support SIMD.
-    pm.addPass<sys::Vectorize>();
-  pm.addPass<sys::GVN>();
-  
-  // ===== Misc =====
-
-  pm.addPass<sys::RegularFold>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::GVN>();
-  pm.addPass<sys::SimplifyCFG>();
-  pm.addPass<sys::Alias>();
-  pm.addPass<sys::DAE>();
-  pm.addPass<sys::DSE>();
-  pm.addPass<sys::DLE>();
-  pm.addPass<sys::Select>();
-  if (aggressive) {
-    pm.addPass<sys::Range>();
-    pm.addPass<sys::RangeAwareFold>();
-    pm.addPass<sys::Splice>();
-  }
-  pm.addPass<sys::RegularFold>();
-  // pm.addPass<sys::Range>();
-  // pm.addPass<sys::RangeAwareFold>();
-  // pm.addPass<sys::Splice>();
-  pm.addPass<sys::DCE>();
-  // pm.addPass<sys::Reassociate>();
-  // pm.addPass<sys::Cached>(); // This doesn't work... but why?
-  pm.addPass<sys::GCM>();
-  pm.addPass<sys::GVN>();
-  pm.addPass<sys::AggressiveDCE>();
-
-  // ===== Late Inline =====
-
-  pm.addPass<sys::LateInline>(/*threshold=*/ opts.lateInlineThreshold);
-  pm.addPass<sys::RegularFold>();
-  pm.addPass<sys::GVN>();
-  pm.addPass<sys::Alias>();
-  pm.addPass<sys::DSE>();
-  pm.addPass<sys::DLE>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::InlineStore>();
-  if (enableO2Experimental)
-    pm.addPass<sys::Cached>();
-  if (enableO2Experimental)
-    pm.addPass<sys::SynthConstArray>();
-  pm.addPass<sys::RegularFold>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::GCM>();
-  pm.addPass<sys::GVN>();
-
-  // ===== Another round of loop optimization =====
-
-  for (int i = 0; i < 3; i++) {
-    pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
-    pm.addPass<sys::LICM>();
-    pm.addPass<sys::SCEV>();
-    pm.addPass<sys::RemoveEmptyLoop>();
-    pm.addPass<sys::GVN>();
-    pm.addPass<sys::RegularFold>();
-  }
-  if (aggressive) {
-    pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
-    pm.addPass<sys::LICM>();
-    pm.addPass<sys::SCEV>();
-    pm.addPass<sys::GVN>();
-    pm.addPass<sys::RegularFold>();
-  }
-
-  // ===== Final Cleanup =====
-
-  if (aggressive) {
-    pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
-    pm.addPass<sys::LICM>();
-    pm.addPass<sys::SCEV>();
-    pm.addPass<sys::GVN>();
-    pm.addPass<sys::RegularFold>();
-    pm.addPass<sys::DCE>();
-  }
-  pm.addPass<sys::AggressiveDCE>();
-  pm.addPass<sys::SimplifyCFG>();
-  pm.addPass<sys::InstSchedule>();
-}
-
-void initCorePipelineO2(sys::PassManager &pm) {
-  initCorePipelineO1(pm, /*aggressive=*/ true);
-}
-
-void initPipeline(sys::PassManager &pm) {
-  if (opts.o2)
-    initCorePipelineO2(pm);
-  else if (opts.o1)
-    initCorePipelineO1(pm, /*aggressive=*/ false);
-  else
-    initCorePipelineO0(pm);
-
-  if (opts.arm)
-    initArmPipeline(pm);
-
-  if (opts.rv)
-    initRvPipeline(pm);
-}
 
 void removeDuplicates(std::vector<Atomic>& clause) {
   std::sort(clause.begin(), clause.end());
@@ -416,8 +187,13 @@ int main(int argc, char **argv) {
   }
 
   sys::PassManager pm(module, opts);
-  
-  initPipeline(pm);
+  auto plan = sys::pipeline::configurePipeline(pm, opts);
+  if (const char *env = std::getenv("SISY_DUMP_PIPELINE_PROFILE")) {
+    if (env[0] && std::strcmp(env, "0") != 0) {
+      std::cerr << "[pipeline] " << sys::pipeline::formatPlan(plan) << "\n";
+      pm.dumpPipelineProfile(std::cerr);
+    }
+  }
   
   pm.run();
   return 0;

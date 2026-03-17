@@ -47,11 +47,6 @@ PassManager::PassManager(ModuleOp *module, const Options &opts):
   }
 }
 
-PassManager::~PassManager() {
-  for (auto pass : passes)
-    delete pass;
-}
-
 void PassManager::run() {
   pastFlatten = false;
   pastMem2Reg = false;
@@ -62,7 +57,8 @@ void PassManager::run() {
   auto totalStart = std::chrono::steady_clock::now();
   double totalMs = 0.0;
 
-  for (auto pass : passes) {
+  for (auto &passPtr : passes) {
+    Pass *pass = passPtr.get();
     const auto &pname = pass->name();
     bool transientIRPass =
       pname == "range" ||
@@ -162,4 +158,10 @@ void PassManager::run() {
     std::cerr << "[pass-timing] total-pass-time : " << totalMs << " ms\n";
     std::cerr << "[pass-timing] total-wall-time : " << wallMs << " ms\n";
   }
+}
+
+void PassManager::dumpPipelineProfile(std::ostream &os) const {
+  os << "===== Pipeline Profile =====\n";
+  for (size_t i = 0; i < passes.size(); i++)
+    os << i << ": " << passes[i]->name() << "\n";
 }

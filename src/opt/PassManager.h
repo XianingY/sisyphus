@@ -3,11 +3,13 @@
 
 #include "Pass.h"
 #include "../main/Options.h"
+#include <memory>
+#include <ostream>
 
 namespace sys {
 
 class PassManager {
-  std::vector<Pass*> passes;
+  std::vector<std::unique_ptr<Pass>> passes;
   ModuleOp *module;
 
   bool pastFlatten;
@@ -21,15 +23,14 @@ class PassManager {
   Options opts;
 public:
   PassManager(ModuleOp *module, const Options &opts);
-  ~PassManager();
 
   void run();
+  void dumpPipelineProfile(std::ostream &os) const;
   ModuleOp *getModule() { return module; }
 
   template<class T, class... Args>
-  void addPass(Args... args) {
-    auto pass = new T(module, std::forward<Args>(args)...);
-    passes.push_back(pass);
+  void addPass(Args&&... args) {
+    passes.emplace_back(std::make_unique<T>(module, std::forward<Args>(args)...));
   }
 };
 
