@@ -194,6 +194,39 @@ int RegAlloc::latePeephole(Op *funcOp) {
         return true;
       }
     }
+    if (isa<MvOp>(next) && !next->atBack() &&
+        op->getUses().size() == 1 &&
+        next->getUses().size() == 1 &&
+        RS(next) == RD(op)) {
+      auto mid = next->nextOp();
+      if (!isa<MvOp>(mid) || mid->atBack() || RS(mid) != RD(next))
+        return false;
+      auto mem = mid->nextOp();
+      bool folded = false;
+      if (isa<LoadOp>(mem) && mem->has<RsAttr>() && mem->has<IntAttr>() &&
+          RS(mem) == RD(mid) && inRange12(V(mem) + offset)) {
+        RS(mem) = RS(op);
+        V(mem) += offset;
+        folded = true;
+      } else if (isa<FldOp>(mem) && mem->has<RsAttr>() && mem->has<IntAttr>() &&
+                 RS(mem) == RD(mid) && inRange12(V(mem) + offset)) {
+        RS(mem) = RS(op);
+        V(mem) += offset;
+        folded = true;
+      } else if (isa<StoreOp>(mem) && mem->has<RsAttr>() && mem->has<Rs2Attr>() && mem->has<IntAttr>() &&
+                 RS2(mem) == RD(mid) && RS(mem) != RD(mid) && inRange12(V(mem) + offset)) {
+        RS2(mem) = RS(op);
+        V(mem) += offset;
+        folded = true;
+      }
+      if (folded) {
+        converted++;
+        mid->erase();
+        next->erase();
+        op->erase();
+        return true;
+      }
+    }
     return false;
   });
 
@@ -286,6 +319,14 @@ int RegAlloc::latePeephole(Op *funcOp) {
     }
     if (!op->atBack()) {
       auto next = op->nextOp();
+      if (isa<MvOp>(next) &&
+          RS(next) == RD(op) &&
+          op->getUses().size() == 1) {
+        RS(next) = RS(op);
+        converted++;
+        op->erase();
+        return true;
+      }
       if (definesReg(next, RD(op)) && !readsReg(next, RD(op))) {
         converted++;
         op->erase();
@@ -303,6 +344,14 @@ int RegAlloc::latePeephole(Op *funcOp) {
     }
     if (!op->atBack()) {
       auto next = op->nextOp();
+      if (isa<FmvOp>(next) &&
+          RS(next) == RD(op) &&
+          op->getUses().size() == 1) {
+        RS(next) = RS(op);
+        converted++;
+        op->erase();
+        return true;
+      }
       if (definesReg(next, RD(op)) && !readsReg(next, RD(op))) {
         converted++;
         op->erase();
