@@ -63,6 +63,9 @@ using namespace sys;
 
 int RegAlloc::latePeephole(Op *funcOp) {
   Builder builder;
+  constexpr int kLargeFrameFoldThreshold = 4096;
+  const bool armLargeFrame =
+    funcOp->has<StackOffsetAttr>() && STACKOFF(funcOp) >= kLargeFrameFoldThreshold;
   auto inSignedUnscaled = [](int x) { return x >= -256 && x <= 255; };
   auto inUnsignedScaled = [](int x, int scale) {
     return x >= 0 && x % scale == 0 && x / scale <= 4095;
@@ -85,6 +88,18 @@ int RegAlloc::latePeephole(Op *funcOp) {
   };
   auto definesReg = [](Op *op, Reg reg) -> bool {
     return op->has<RdAttr>() && RD(op) == reg;
+  };
+  auto isFrameBase = [](Reg reg) -> bool {
+    return reg == Reg::sp || reg == Reg::x29;
+  };
+  auto canTwoHopFold = [&](AddXIOp *op) -> bool {
+    if (!op->has<RdAttr>() || !op->has<RsAttr>())
+      return false;
+    if (armLargeFrame)
+      return false;
+    if (isFrameBase(RS(op)) || isFrameBase(RD(op)))
+      return false;
+    return true;
   };
   auto canEraseAddrTmp = [&](AddXIOp *op, Op *folded) -> bool {
     Reg rd = RD(op);
@@ -234,10 +249,13 @@ int RegAlloc::latePeephole(Op *funcOp) {
     // (calls, ret paths) are not fully visible to this local peephole.
     if (RD(op) == Reg::sp)
       return false;
+    if (isFrameBase(RS(op)) || isFrameBase(RD(op)))
+      return false;
 
     auto next = op->nextOp();
     int offset = V(op);
     if (isa<AddXIOp>(next) &&
+        canTwoHopFold(op) &&
         op->getUses().size() == 1 &&
         next->getUses().size() == 1 &&
         next->has<RdAttr>() && next->has<RsAttr>() && next->has<IntAttr>() &&
@@ -316,6 +334,7 @@ int RegAlloc::latePeephole(Op *funcOp) {
     }
 
     if (isa<MovROp>(next) && !next->atBack() &&
+        canTwoHopFold(op) &&
         op->getUses().size() == 1 &&
         RS(next) == RD(op)) {
       auto mem = next->nextOp();
@@ -390,6 +409,7 @@ int RegAlloc::latePeephole(Op *funcOp) {
       }
     }
     if (isa<MovROp>(next) && !next->atBack() &&
+        canTwoHopFold(op) &&
         op->getUses().size() == 1 &&
         next->getUses().size() == 1 &&
         RS(next) == RD(op)) {
@@ -400,56 +420,60 @@ int RegAlloc::latePeephole(Op *funcOp) {
       bool folded = false;
       if (isa<LdrXOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS(mem) == RD(mid) && validMemOffset(mem, nextOffset)) {
+        if (RS(mem) == RD(mid) && validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<LdrWOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS(mem) == RD(mid) && validMemOffset(mem, nextOffset)) {
+        if (RS(mem) == RD(mid) && validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<LdrFOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS(mem) == RD(mid) && validMemOffset(mem, nextOffset)) {
+        if (RS(mem) == RD(mid) && validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<LdrDOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS(mem) == RD(mid) && validMemOffset(mem, nextOffset)) {
+        if (RS(mem) == RD(mid) && validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<StrXOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS2(mem) == RD(mid) && RS(mem) != RD(mid) && validMemOffset(mem, nextOffset)) {
+        if (RS2(mem) == RD(mid) && RS(mem) != RD(mid) &&
+            validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS2(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<StrWOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS2(mem) == RD(mid) && RS(mem) != RD(mid) && validMemOffset(mem, nextOffset)) {
+        if (RS2(mem) == RD(mid) && RS(mem) != RD(mid) &&
+            validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS2(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<StrFOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS2(mem) == RD(mid) && RS(mem) != RD(mid) && validMemOffset(mem, nextOffset)) {
+        if (RS2(mem) == RD(mid) && RS(mem) != RD(mid) &&
+            validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS2(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
         }
       } else if (isa<StrDOp>(mem)) {
         int nextOffset = V(mem) + offset;
-        if (RS2(mem) == RD(mid) && RS(mem) != RD(mid) && validMemOffset(mem, nextOffset)) {
+        if (RS2(mem) == RD(mid) && RS(mem) != RD(mid) &&
+            validMemOffset(mem, nextOffset) && canEraseAddrTmp(op, mem)) {
           RS2(mem) = RS(op);
           V(mem) = nextOffset;
           folded = true;
@@ -530,7 +554,8 @@ int RegAlloc::latePeephole(Op *funcOp) {
     }
     if (isa<StrFOp>(next)) {
       int nextOffset = V(next) + offset;
-      if (RS2(next) == RD(op) && validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
+      if (RS2(next) == RD(op) && RS(next) != RD(op) &&
+          validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
         converted++;
         RS2(next) = RS(op);
         V(next) = nextOffset;
@@ -540,7 +565,8 @@ int RegAlloc::latePeephole(Op *funcOp) {
     }
     if (isa<StrDOp>(next)) {
       int nextOffset = V(next) + offset;
-      if (RS2(next) == RD(op) && validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
+      if (RS2(next) == RD(op) && RS(next) != RD(op) &&
+          validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
         converted++;
         RS2(next) = RS(op);
         V(next) = nextOffset;

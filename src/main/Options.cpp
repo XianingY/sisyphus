@@ -226,12 +226,26 @@ Options sys::parseArgs(int argc, char **argv) {
   if (opts.emitIR)
     opts.dumpMidIR = true;
 
-  if (!opts.inlineThresholdExplicit)
-    opts.inlineThreshold = opts.o2 ? 256 : 200;
-  if (!opts.lateInlineThresholdExplicit)
-    opts.lateInlineThreshold = opts.o2 ? 256 : 200;
-  if (!opts.loopRotateExplicit && (opts.o1 || opts.o2))
-    opts.disableLoopRotate = true;
+  if (!opts.inlineThresholdExplicit) {
+    if (opts.o2)
+      opts.inlineThreshold = 256;
+    else if (opts.rv && opts.o1)
+      opts.inlineThreshold = 320;
+    else
+      opts.inlineThreshold = 200;
+  }
+  if (!opts.lateInlineThresholdExplicit) {
+    if (opts.o2)
+      opts.lateInlineThreshold = 256;
+    else if (opts.rv && opts.o1)
+      opts.lateInlineThreshold = 320;
+    else
+      opts.lateInlineThreshold = 200;
+  }
+  if (!opts.loopRotateExplicit) {
+    if (opts.o1 || opts.o2)
+      opts.disableLoopRotate = true;
+  }
 
   if (opts.inputFile.empty() && !opts.bv && !opts.sat) {
     std::cerr

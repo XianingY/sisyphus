@@ -57,7 +57,7 @@ std::map<std::string, int> DCE::stats() {
 }
 
 bool DCE::isImpure(Op *op) {
-  if (isa<StoreOp>(op) || isa<ReturnOp>(op) ||
+  if (isa<StoreOp>(op) || isa<ReturnOp>(op) || isa<GetArgOp>(op) ||
       isa<BranchOp>(op) || isa<GotoOp>(op) ||
       isa<ProceedOp>(op) || isa<BreakOp>(op) ||
       isa<ContinueOp>(op) || isa<ForOp>(op) ||
@@ -118,9 +118,21 @@ void DCE::run() {
     for (auto func : funcs)
       runOnRegion(func->getRegion());
 
-    elimOp += removeable.size();
-    for (auto op : removeable)
-      op->erase();
+    std::vector<Op*> toErase;
+    toErase.reserve(removeable.size());
+    for (auto op : removeable) {
+      // Some ops may become live again via use/def rewrites while we are
+      // collecting candidates. Skip them defensively instead of asserting.
+      if (!op->getUses().empty())
+        continue;
+      op->removeAllOperands();
+      toErase.push_back(op);
+    }
+
+    elimOp += toErase.size();
+    // Erase users before defs when possible to keep use-lists consistent.
+    for (auto it = toErase.rbegin(); it != toErase.rend(); ++it)
+      (*it)->erase();
   } while (removeable.size());
 
   // Remove unused phi's. 

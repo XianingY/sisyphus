@@ -23,6 +23,7 @@ void Mem2Reg::runImpl(FuncOp *func) {
   region->updateDoms();
   region->updateDomFront();
   domtree = getDomTree(region);
+  auto entry = region->getFirstBlock();
 
   Builder builder;
 
@@ -35,6 +36,13 @@ void Mem2Reg::runImpl(FuncOp *func) {
     // If the alloca is used for, as an example, AddOp, then
     // it's an array and can't be promoted to registers.
     for (auto use : alloca->getUses()) {
+      // Current SSA renaming walks reachable domtree from entry. If a use
+      // lives in an unreachable block, partial promotion can leave stale
+      // users behind. Keep such allocas in memory form.
+      if (!use->getParent()->dominatedBy(entry)) {
+        good = false;
+        break;
+      }
       if (!isa<LoadOp>(use) && !isa<StoreOp>(use)) {
         good = false;
         break;
@@ -97,8 +105,13 @@ void Mem2Reg::runImpl(FuncOp *func) {
 
   fillPhi(func->getRegion()->getFirstBlock(), {});
 
-  for (auto alloca : converted)
+  for (auto alloca : converted) {
+    // Be conservative: if any user remains, promotion was partial and erasing
+    // the alloca would corrupt use-def chains.
+    if (!alloca->getUses().empty())
+      continue;
     alloca->erase();
+  }
 }
 
 void Mem2Reg::fillPhi(BasicBlock *bb, SymbolTable symbols) {

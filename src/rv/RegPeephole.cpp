@@ -68,6 +68,16 @@ int RegAlloc::latePeephole(Op *funcOp) {
   auto definesReg = [](Op *op, Reg reg) -> bool {
     return op->has<RdAttr>() && RD(op) == reg;
   };
+  auto isFrameBase = [](Reg reg) -> bool {
+    return reg == Reg::sp || reg == Reg::s0;
+  };
+  auto canTwoHopFold = [&](AddiOp *op) -> bool {
+    if (!op->has<RdAttr>() || !op->has<RsAttr>())
+      return false;
+    if (isFrameBase(RS(op)) || isFrameBase(RD(op)))
+      return false;
+    return true;
+  };
   auto canEraseAddrTmp = [&](AddiOp *op, Op *folded) -> bool {
     Reg rd = RD(op);
     Op *cur = folded;
@@ -151,10 +161,13 @@ int RegAlloc::latePeephole(Op *funcOp) {
     // `sp` arithmetic is frame-structure critical across prologue/epilogue.
     if (RD(op) == Reg::sp)
       return false;
+    if (isFrameBase(RS(op)) || isFrameBase(RD(op)))
+      return false;
 
     auto next = op->nextOp();
     int offset = V(op);
     if (isa<AddiOp>(next) &&
+        canTwoHopFold(op) &&
         op->getUses().size() == 1 &&
         next->getUses().size() == 1 &&
         next->has<RdAttr>() && next->has<RsAttr>() && next->has<IntAttr>() &&
@@ -180,7 +193,8 @@ int RegAlloc::latePeephole(Op *funcOp) {
         V(mem) += offset + extra;
         folded = true;
       } else if (isa<FsdOp>(mem) && mem->has<RsAttr>() && mem->has<Rs2Attr>() && mem->has<IntAttr>() &&
-                 RS2(mem) == RD(next) && inRange12(V(mem) + offset + extra) && canEraseAddrTmp(op, mem)) {
+                 RS2(mem) == RD(next) && RS(mem) != RD(next) &&
+                 inRange12(V(mem) + offset + extra) && canEraseAddrTmp(op, mem)) {
         RS2(mem) = RS(op);
         V(mem) += offset + extra;
         folded = true;
@@ -220,6 +234,7 @@ int RegAlloc::latePeephole(Op *funcOp) {
       return true;
     }
     if (isa<MvOp>(next) && !next->atBack() &&
+        canTwoHopFold(op) &&
         op->getUses().size() == 1 &&
         RS(next) == RD(op)) {
       auto mem = next->nextOp();
@@ -249,6 +264,7 @@ int RegAlloc::latePeephole(Op *funcOp) {
       }
     }
     if (isa<MvOp>(next) && !next->atBack() &&
+        canTwoHopFold(op) &&
         op->getUses().size() == 1 &&
         next->getUses().size() == 1 &&
         RS(next) == RD(op)) {

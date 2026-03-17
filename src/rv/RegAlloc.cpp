@@ -289,6 +289,7 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
   // Interference graph.
   std::unordered_map<Op*, std::set<Op*>> interf, spillInterf;
   std::unordered_map<Op*, long long> spillWeight;
+  std::unordered_map<Op*, int> callSpan;
 
   // Values of readreg, or operands of writereg, or phis (mvs), are prioritzed.
   std::unordered_map<Op*, int> priority;
@@ -377,7 +378,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       int l = std::max(0, def + 1);
       int r = std::min<int>(ops.size(), last);
       int callCount = callPrefix[r] - callPrefix[l];
-      spillWeight[op] += 64LL * localWeight * callCount;
+      callSpan[op] = std::max(callSpan[op], callCount);
+      spillWeight[op] += 80LL * localWeight * callCount;
     }
 
     // We use event-driven approach to optimize it into O(n log n + E).
@@ -484,8 +486,13 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       auto ref = prefer[op];
       // Try to allocate the same register as `ref`.
       if (assignment.count(ref) && !bad.count(assignment[ref])) {
-        assignment[op] = assignment[ref];
-        continue;
+        Reg preferredReg = assignment[ref];
+        bool crossCallRisk =
+          (callSpan[op] > 1 || callSpan[ref] > 1) && callerSaved.count(preferredReg);
+        if (!crossCallRisk) {
+          assignment[op] = preferredReg;
+          continue;
+        }
       }
     }
 
@@ -763,6 +770,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
     // To actually make it work.
     if (bb->succs.size() <= 1)
       continue;
+    if (bb->getOpCount() == 0)
+      continue;
 
     // Note that we need to split even if there's no phi in one of the blocks.
     // This is because the registers of branch operation can be clobbered if that's not done.
@@ -775,6 +784,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
     auto edge1 = region->insertAfter(bb);
     auto edge2 = region->insertAfter(bb);
     auto bbTerm = bb->getLastOp();
+    if (!bbTerm)
+      continue;
 
     // Create edge for target branch.
     auto target = bbTerm->get<TargetAttr>();
@@ -915,7 +926,11 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
     }
 
     // Move sorted phis so that they're in the correct order.
+    if (bb->getOpCount() == 0)
+      continue;
     Op* term = bb->getLastOp();
+    if (!term)
+      continue;
 
     std::unordered_set<Reg> emitted;
 

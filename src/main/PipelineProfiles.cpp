@@ -63,32 +63,63 @@ void appendCoreO0(sys::PassManager &pm) {
 
 void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, bool aggressive) {
   const bool enableO2Experimental = aggressive && !opts.disableO2Experimental;
+  const bool enableO1LiteTail = !aggressive;
+  const bool armSafeStructured = opts.arm;
 
   pm.addPass<sys::MoveAlloca>();
 
-  pm.addPass<sys::AtMostOnce>();
-  pm.addPass<sys::Localize>(/*beforeFlattenCFG=*/ true);
-  pm.addPass<sys::EarlyConstFold>(/*beforePureness=*/ true);
-  pm.addPass<sys::Pureness>();
-  pm.addPass<sys::EarlyConstFold>(/*beforePureness=*/ false);
-  pm.addPass<sys::TCO>();
-  pm.addPass<sys::Remerge>();
-  pm.addPass<sys::RaiseToFor>();
-  pm.addPass<sys::DCE>(/*elimBlocks=*/ false);
-  pm.addPass<sys::EarlyInline>();
-  pm.addPass<sys::RegularFold>();
-  pm.addPass<sys::View>();
-  pm.addPass<sys::LoopDCE>();
-  pm.addPass<sys::TidyMemory>();
-  if (aggressive) {
-    pm.addPass<sys::Fusion>();
-    pm.addPass<sys::Unswitch>();
+  if (armSafeStructured) {
+    pm.addPass<sys::AtMostOnce>();
+    pm.addPass<sys::Localize>(/*beforeFlattenCFG=*/ true);
+    pm.addPass<sys::EarlyConstFold>(/*beforePureness=*/ true);
+    pm.addPass<sys::Pureness>();
+    pm.addPass<sys::EarlyConstFold>(/*beforePureness=*/ false);
+    pm.addPass<sys::TCO>();
+    pm.addPass<sys::Remerge>();
+    pm.addPass<sys::RaiseToFor>();
+    pm.addPass<sys::DCE>(/*elimBlocks=*/ false);
+  } else {
+    pm.addPass<sys::AtMostOnce>();
+    pm.addPass<sys::Localize>(/*beforeFlattenCFG=*/ true);
+    pm.addPass<sys::EarlyConstFold>(/*beforePureness=*/ true);
+    pm.addPass<sys::Pureness>();
+    pm.addPass<sys::EarlyConstFold>(/*beforePureness=*/ false);
+    pm.addPass<sys::TCO>();
+    pm.addPass<sys::Remerge>();
+    pm.addPass<sys::RaiseToFor>();
+    pm.addPass<sys::DCE>(/*elimBlocks=*/ false);
+    pm.addPass<sys::EarlyInline>();
+    pm.addPass<sys::RegularFold>();
+    pm.addPass<sys::View>();
+    pm.addPass<sys::LoopDCE>();
+    pm.addPass<sys::TidyMemory>();
+    if (aggressive) {
+      pm.addPass<sys::Fusion>();
+      pm.addPass<sys::Unswitch>();
+    }
+    pm.addPass<sys::DCE>(/*elimBlocks=*/ false);
+    pm.addPass<sys::ColumnMajor>();
+    if (!opts.arm)
+      pm.addPass<sys::Parallelizable>();
+    pm.addPass<sys::LoopDCE>();
   }
-  pm.addPass<sys::DCE>(/*elimBlocks=*/ false);
-  pm.addPass<sys::ColumnMajor>();
-  pm.addPass<sys::Parallelizable>();
-  pm.addPass<sys::LoopDCE>();
   pm.addPass<sys::Lower>();
+
+  // ARM keeps a conservative mid-end tail for stability on open-perf
+  // correctness-sensitive families. Run an extra CFG cleanup after select to
+  // ensure phi/pred consistency in edge-case structured lowering patterns.
+  if (opts.arm) {
+    pm.addPass<sys::FlattenCFG>();
+    pm.addPass<sys::GVN>();
+    pm.addPass<sys::DCE>();
+    pm.addPass<sys::Mem2Reg>();
+    pm.addPass<sys::RegularFold>();
+    pm.addPass<sys::DCE>();
+    pm.addPass<sys::SimplifyCFG>();
+    pm.addPass<sys::DCE>();
+    pm.addPass<sys::InstSchedule>();
+    return;
+  }
 
   pm.addPass<sys::FlattenCFG>();
   pm.addPass<sys::GVN>();
@@ -107,7 +138,7 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, bool aggressiv
   pm.addPass<sys::DSE>();
   pm.addPass<sys::DLE>();
   pm.addPass<sys::GVN>();
-  if (aggressive)
+  if (aggressive || enableO1LiteTail)
     pm.addPass<sys::Reassociate>();
 
   pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
@@ -119,7 +150,7 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, bool aggressiv
     pm.addPass<sys::ConstLoopUnroll>();
   pm.addPass<sys::SCEV>();
   pm.addPass<sys::AggressiveDCE>();
-  if (opts.arm)
+  if (opts.arm && opts.enableExperimental)
     pm.addPass<sys::Vectorize>();
   pm.addPass<sys::GVN>();
 
@@ -132,10 +163,17 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, bool aggressiv
   pm.addPass<sys::DSE>();
   pm.addPass<sys::DLE>();
   pm.addPass<sys::Select>();
-  if (aggressive) {
+  if (aggressive || enableO1LiteTail) {
     pm.addPass<sys::Range>();
     pm.addPass<sys::RangeAwareFold>();
     pm.addPass<sys::Splice>();
+  }
+  if (enableO1LiteTail) {
+    pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
+    pm.addPass<sys::LICM>();
+    pm.addPass<sys::SCEV>();
+    pm.addPass<sys::GVN>();
+    pm.addPass<sys::RegularFold>();
   }
   pm.addPass<sys::RegularFold>();
   pm.addPass<sys::DCE>();
@@ -211,7 +249,10 @@ PipelinePlan selectPlan(const Options &opts) {
     plan.coreProfile = CoreProfile::O1;
   else
     plan.coreProfile = CoreProfile::O0;
-  plan.aggressive = opts.o2;
+  // Keep ARM O1 conservative, but let RISC-V O1 reuse the aggressive core
+  // pipeline shape to avoid known median* regressions while preserving O2-only
+  // experimental toggles.
+  plan.aggressive = opts.o2 || (opts.o1 && opts.rv);
   plan.enableO2Experimental = opts.o2 && !opts.disableO2Experimental;
   plan.useArmBackend = opts.arm;
   plan.useRvBackend = opts.rv;

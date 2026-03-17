@@ -291,11 +291,17 @@ void Dump::dumpOp(Op *op, std::ostream &os) {
     os << "cset " << wreg(RD(op)) << ", eq\n";
     break;
   case CselNeZOp::id:
-    os << "cmp " << wreg(RS(op)) << ", #0\n  ";
+    if (RS(op) == Reg::xzr)
+      os << "cmp wzr, wzr\n  ";
+    else
+      os << "cmp " << wreg(RS(op)) << ", #0\n  ";
     os << "csel " << wreg(RD(op)) << ", " << wreg(RS2(op)) << ", " << wreg(RS3(op)) << ", ne\n";
     break;
   case CselLtZOp::id:
-    os << "cmp " << wreg(RS(op)) << ", #0\n  ";
+    if (RS(op) == Reg::xzr)
+      os << "cmp wzr, wzr\n  ";
+    else
+      os << "cmp " << wreg(RS(op)) << ", #0\n  ";
     os << "csel " << wreg(RD(op)) << ", " << wreg(RS2(op)) << ", " << wreg(RS3(op)) << ", lt\n";
     break;
   case RetOp::id:
@@ -368,7 +374,10 @@ void Dump::dumpOp(Op *op, std::ostream &os) {
     os << "smull " << xreg(RD(op)) << ", " << wreg(RS(op)) << ", " << wreg(RS2(op)) << "\n";
     break;
   case CnegLtZOp::id:
-    os << "cmp " << wreg(RS(op)) << ", #0\n  ";
+    if (RS(op) == Reg::xzr)
+      os << "cmp wzr, wzr\n  ";
+    else
+      os << "cmp " << wreg(RS(op)) << ", #0\n  ";
     os << "cneg " << wreg(RD(op)) << ", " << wreg(RS2(op)) << ", lt\n";
     break;
   case DupOp::id:
