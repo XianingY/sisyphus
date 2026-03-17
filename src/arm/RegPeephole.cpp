@@ -101,6 +101,22 @@ int RegAlloc::latePeephole(Op *funcOp) {
 
   int converted = 0;
 
+  runRewriter(funcOp, [&](AdrOp *op) {
+    auto prev = op->prevOp();
+    if (!prev || !isa<AdrOp>(prev))
+      return false;
+    if (NAME(prev) != NAME(op))
+      return false;
+
+    converted++;
+    if (RD(prev) != RD(op)) {
+      builder.setBeforeOp(op);
+      builder.create<MovROp>({ RDC(RD(op)), RSC(RD(prev)) });
+    }
+    op->erase();
+    return true;
+  });
+
   runRewriter(funcOp, [&](StrWOp *op) {
     if (op == op->getParent()->getLastOp())
       return false;
@@ -222,6 +238,78 @@ int RegAlloc::latePeephole(Op *funcOp) {
     auto next = op->nextOp();
     int offset = V(op);
 
+    if (isa<MovROp>(next) && !next->atBack() &&
+        op->getUses().size() == 1 &&
+        RS(next) == RD(op)) {
+      auto mem = next->nextOp();
+      bool folded = false;
+      if (isa<LdrXOp>(mem)) {
+        int nextOffset = V(mem) + offset;
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+          RS(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<LdrWOp>(mem)) {
+        int nextOffset = V(mem) + offset;
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+          RS(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<LdrFOp>(mem)) {
+        int nextOffset = V(mem) + offset;
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+          RS(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<LdrDOp>(mem)) {
+        int nextOffset = V(mem) + offset;
+        if (RS(mem) == RD(next) && validMemOffset(mem, nextOffset)) {
+          RS(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<StrXOp>(mem)) {
+        int nextOffset = V(mem) + offset;
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+          RS2(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<StrWOp>(mem)) {
+        int nextOffset = V(mem) + offset;
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+          RS2(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<StrFOp>(mem)) {
+        int nextOffset = V(mem) + offset;
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+          RS2(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      } else if (isa<StrDOp>(mem)) {
+        int nextOffset = V(mem) + offset;
+        if (RS2(mem) == RD(next) && RS(mem) != RD(next) && validMemOffset(mem, nextOffset)) {
+          RS2(mem) = RS(op);
+          V(mem) = nextOffset;
+          folded = true;
+        }
+      }
+
+      if (folded) {
+        converted++;
+        next->erase();
+        op->erase();
+        return true;
+      }
+    }
+
+
     if (isa<LdrXOp>(next)) {
       int nextOffset = V(next) + offset;
       if (RS(next) == RD(op) && validMemOffset(next, nextOffset) && canEraseAddrTmp(op, next)) {
@@ -314,6 +402,14 @@ int RegAlloc::latePeephole(Op *funcOp) {
       op->erase();
       return true;
     }
+    if (!op->atBack()) {
+      auto next = op->nextOp();
+      if (definesReg(next, RD(op)) && !readsReg(next, RD(op))) {
+        converted++;
+        op->erase();
+        return true;
+      }
+    }
     return false;
   });
 
@@ -322,6 +418,14 @@ int RegAlloc::latePeephole(Op *funcOp) {
       converted++;
       op->erase();
       return true;
+    }
+    if (!op->atBack()) {
+      auto next = op->nextOp();
+      if (definesReg(next, RD(op)) && !readsReg(next, RD(op))) {
+        converted++;
+        op->erase();
+        return true;
+      }
     }
     return false;
   });
@@ -426,6 +530,63 @@ void RegAlloc::tidyup(Region *region) {
 
   // Now branches are still having both TargetAttr and ElseAttr.
   // Replace them (perform split when necessary), so that they only have one target.
+  runRewriter(funcOp, [&](BltOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<BOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+  runRewriter(funcOp, [&](BgtOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<BOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+  runRewriter(funcOp, [&](BleOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<BOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+  runRewriter(funcOp, [&](BgeOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<BOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+  runRewriter(funcOp, [&](BeqOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<BOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+  runRewriter(funcOp, [&](BneOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<BOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+  runRewriter(funcOp, [&](CbzOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<BOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+  runRewriter(funcOp, [&](CbnzOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<BOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+
   REPLACE_BRANCH(BltOp, BgeOp, BINARY_BRANCH);
   REPLACE_BRANCH(BleOp, BgtOp, BINARY_BRANCH);
   REPLACE_BRANCH(BeqOp, BneOp, BINARY_BRANCH);

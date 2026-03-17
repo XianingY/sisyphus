@@ -60,8 +60,32 @@ using namespace sys;
 int RegAlloc::latePeephole(Op *funcOp) {
   Builder builder;
   auto inRange12 = [](int x) { return x > -2048 && x < 2048; };
+  auto readsReg = [](Op *op, Reg reg) -> bool {
+    return (op->has<RsAttr>() && RS(op) == reg) ||
+           (op->has<Rs2Attr>() && RS2(op) == reg) ||
+           (op->has<RegAttr>() && REG(op) == reg);
+  };
+  auto definesReg = [](Op *op, Reg reg) -> bool {
+    return op->has<RdAttr>() && RD(op) == reg;
+  };
 
   int converted = 0;
+
+  runRewriter(funcOp, [&](LaOp *op) {
+    auto prev = op->prevOp();
+    if (!prev || !isa<LaOp>(prev))
+      return false;
+    if (NAME(prev) != NAME(op))
+      return false;
+
+    converted++;
+    if (RD(prev) != RD(op)) {
+      builder.setBeforeOp(op);
+      builder.create<MvOp>({ RDC(RD(op)), RSC(RD(prev)) });
+    }
+    op->erase();
+    return true;
+  });
 
   runRewriter(funcOp, [&](StoreOp *op) {
     if (op->atBack())
@@ -111,6 +135,10 @@ int RegAlloc::latePeephole(Op *funcOp) {
       return false;
     if (!op->has<RdAttr>() || !op->has<RsAttr>() || !op->has<IntAttr>())
       return false;
+    // Never fold stack-pointer updates into memory offsets.
+    // `sp` arithmetic is frame-structure critical across prologue/epilogue.
+    if (RD(op) == Reg::sp)
+      return false;
 
     auto next = op->nextOp();
     int offset = V(op);
@@ -129,6 +157,42 @@ int RegAlloc::latePeephole(Op *funcOp) {
       V(next) += offset;
       op->erase();
       return true;
+    }
+    if (isa<StoreOp>(next) && next->has<RsAttr>() && next->has<Rs2Attr>() && next->has<IntAttr>() &&
+        RS2(next) == RD(op) && RS(next) != RD(op) && inRange12(V(next) + offset)) {
+      converted++;
+      RS2(next) = RS(op);
+      V(next) += offset;
+      op->erase();
+      return true;
+    }
+    if (isa<MvOp>(next) && !next->atBack() &&
+        op->getUses().size() == 1 &&
+        RS(next) == RD(op)) {
+      auto mem = next->nextOp();
+      bool folded = false;
+      if (isa<LoadOp>(mem) && mem->has<RsAttr>() && mem->has<IntAttr>() &&
+          RS(mem) == RD(next) && inRange12(V(mem) + offset)) {
+        RS(mem) = RS(op);
+        V(mem) += offset;
+        folded = true;
+      } else if (isa<FldOp>(mem) && mem->has<RsAttr>() && mem->has<IntAttr>() &&
+                 RS(mem) == RD(next) && inRange12(V(mem) + offset)) {
+        RS(mem) = RS(op);
+        V(mem) += offset;
+        folded = true;
+      } else if (isa<StoreOp>(mem) && mem->has<RsAttr>() && mem->has<Rs2Attr>() && mem->has<IntAttr>() &&
+                 RS2(mem) == RD(next) && RS(mem) != RD(next) && inRange12(V(mem) + offset)) {
+        RS2(mem) = RS(op);
+        V(mem) += offset;
+        folded = true;
+      }
+      if (folded) {
+        converted++;
+        next->erase();
+        op->erase();
+        return true;
+      }
     }
     return false;
   });
@@ -216,6 +280,16 @@ int RegAlloc::latePeephole(Op *funcOp) {
         // We need to change the content of mv2 and erase this one.
         op->erase();
         std::swap(RD(mv2), RS(mv2));
+        converted++;
+        return true;
+      }
+    }
+    if (!op->atBack()) {
+      auto next = op->nextOp();
+      if (definesReg(next, RD(op)) && !readsReg(next, RD(op))) {
+        converted++;
+        op->erase();
+        return true;
       }
     }
     return false;
@@ -226,6 +300,14 @@ int RegAlloc::latePeephole(Op *funcOp) {
       converted++;
       op->erase();
       return true;
+    }
+    if (!op->atBack()) {
+      auto next = op->nextOp();
+      if (definesReg(next, RD(op)) && !readsReg(next, RD(op))) {
+        converted++;
+        op->erase();
+        return true;
+      }
     }
     return false;
   });
@@ -336,6 +418,49 @@ void RegAlloc::tidyup(Region *region) {
 
   // Now branches are still having both TargetAttr and ElseAttr.
   // Replace them (perform split when necessary), so that they only have one target.
+  runRewriter(funcOp, [&](BltOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<JOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+  runRewriter(funcOp, [&](BgeOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<JOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+  runRewriter(funcOp, [&](BleOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<JOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+  runRewriter(funcOp, [&](BgtOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<JOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+  runRewriter(funcOp, [&](BeqOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<JOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+  runRewriter(funcOp, [&](BneOp *op) {
+    if (op->has<ElseAttr>() && TARGET(op) == ELSE(op)) {
+      builder.replace<JOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    return false;
+  });
+
   REPLACE_BRANCH(BltOp, BgeOp);
   REPLACE_BRANCH(BeqOp, BneOp);
   REPLACE_BRANCH(BleOp, BgtOp);

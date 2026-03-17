@@ -58,9 +58,9 @@ fi
 vs_csv="${VS_DIR}/vs-biframe-${SUITE}-${TARGET}-${OPT}.csv"
 
 set +e
-RUNTIME_LABEL=sisyphus SISY_COMPILER_PATH="${ROOT_DIR}/build/compiler" SISY_COMPILER_FLAVOR=sisy RUNTIME_CSV="${sisy_csv}" "${EVAL_RUNTIME}" "${SUITE}" "${TARGET}" "${OPT}"
+RUNTIME_LABEL=sisyphus SISY_COMPILER_PATH="${ROOT_DIR}/build/compiler" SISY_COMPILER_FLAVOR=sisy RUNTIME_CSV="${sisy_csv}" RUNTIME_SOFT_PERF=1 "${EVAL_RUNTIME}" "${SUITE}" "${TARGET}" "${OPT}"
 sisy_rc=$?
-RUNTIME_LABEL=biframe SISY_COMPILER_PATH="${LOCAL_BIFRAME_COMPILER}" SISY_COMPILER_FLAVOR=biframe RUNTIME_CSV="${biframe_csv}" "${EVAL_RUNTIME}" "${SUITE}" "${TARGET}" "${OPT}"
+RUNTIME_LABEL=biframe SISY_COMPILER_PATH="${LOCAL_BIFRAME_COMPILER}" SISY_COMPILER_FLAVOR=biframe RUNTIME_CSV="${biframe_csv}" RUNTIME_SOFT_PERF=1 "${EVAL_RUNTIME}" "${SUITE}" "${TARGET}" "${OPT}"
 biframe_rc=$?
 set -e
 

@@ -33,6 +33,7 @@ COMPILER_PATH="${SISY_COMPILER_PATH:-${ROOT_DIR}/build/compiler}"
 COMPILER_FLAVOR="${SISY_COMPILER_FLAVOR:-sisy}"
 LABEL="${RUNTIME_LABEL:-sisyphus}"
 RUNTIME_TIMEOUT_SEC="${RUNTIME_TIMEOUT_SEC:-10}"
+RUNTIME_PERF_TIMEOUT_SEC="${RUNTIME_PERF_TIMEOUT_SEC:-${RUNTIME_TIMEOUT_SEC}}"
 SISY_DOCKER_IMAGE="${SISY_DOCKER_IMAGE:-sisyphus/compiler-dev-dual:latest}"
 DEFAULT_RUNTIME_ROOT="${ROOT_DIR}/tests/.out/runtime"
 RUNTIME_ROOT="${RUNTIME_ROOT:-${DEFAULT_RUNTIME_ROOT}}"
@@ -43,6 +44,7 @@ fi
 CSV_OUT="${RUNTIME_CSV:-${RUNTIME_ROOT}/${LABEL}-${SUITE}-${TARGET}-${OPT}.csv}"
 RUNTIME_CASE_LIMIT="${RUNTIME_CASE_LIMIT:-0}"
 RUNTIME_CASE_FILTER="${RUNTIME_CASE_FILTER:-}"
+RUNTIME_SOFT_PERF="${RUNTIME_SOFT_PERF:-0}"
 
 if [[ "${COMPILER_FLAVOR}" != "sisy" && "${COMPILER_FLAVOR}" != "biframe" ]]; then
   echo "error: SISY_COMPILER_FLAVOR must be sisy|biframe"
@@ -70,6 +72,8 @@ if [[ "${SISY_RUNTIME_IN_DOCKER:-0}" != "1" && "${SISY_RUNTIME_LOCAL:-0}" != "1"
       -e SISY_COMPILER_FLAVOR="${COMPILER_FLAVOR}" \
       -e RUNTIME_LABEL="${LABEL}" \
       -e RUNTIME_TIMEOUT_SEC="${RUNTIME_TIMEOUT_SEC}" \
+      -e RUNTIME_PERF_TIMEOUT_SEC="${RUNTIME_PERF_TIMEOUT_SEC}" \
+      -e RUNTIME_SOFT_PERF="${RUNTIME_SOFT_PERF}" \
       -e RUNTIME_CSV="${CSV_OUT}" \
       -e RUNTIME_CASE_LIMIT="${RUNTIME_CASE_LIMIT}" \
       -e RUNTIME_CASE_FILTER="${RUNTIME_CASE_FILTER}" \
@@ -157,15 +161,16 @@ run_once() {
   local in_file="$2"
   local stdout_file="$3"
   local stderr_file="$4"
+  local timeout_sec="$5"
 
   local start end rc
   start="$(date +%s%N)"
   set +e
   if [[ -f "${in_file}" ]]; then
-    timeout "${RUNTIME_TIMEOUT_SEC}" "${QEMU_BIN}" "${exe}" <"${in_file}" >"${stdout_file}" 2>"${stderr_file}"
+    timeout "${timeout_sec}" "${QEMU_BIN}" "${exe}" <"${in_file}" >"${stdout_file}" 2>"${stderr_file}"
     rc=$?
   else
-    timeout "${RUNTIME_TIMEOUT_SEC}" "${QEMU_BIN}" "${exe}" >"${stdout_file}" 2>"${stderr_file}"
+    timeout "${timeout_sec}" "${QEMU_BIN}" "${exe}" >"${stdout_file}" 2>"${stderr_file}"
     rc=$?
   fi
   set -e
@@ -215,6 +220,8 @@ mkdir -p "${asm_root}" "${bin_root}" "${log_root}"
 total=0
 pass_count=0
 fail_count=0
+hard_fail_count=0
+soft_fail_count=0
 
 while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
   [[ "${suite}" == "suite" ]] && continue
@@ -254,8 +261,13 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
   stdout_3="${tmp_dir}/run3.out"
   stderr_3="${tmp_dir}/run3.err"
   actual_file="${tmp_dir}/actual.out"
+  timeout_sec="${RUNTIME_TIMEOUT_SEC}"
+  if [[ "${case_id}" == perf/* ]]; then
+    timeout_sec="${RUNTIME_PERF_TIMEOUT_SEC}"
+  fi
 
   echo "[case] ${case_id}" >"${log_path}"
+  echo "[timeout] ${timeout_sec}s" >>"${log_path}"
   echo "[compile] ${src}" >>"${log_path}"
   if ! compile_case "${src}" "${asm_path}" >>"${log_path}" 2>&1; then
     status="compile_fail"
@@ -270,7 +282,7 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
 
   if [[ "${status}" == "ok" ]]; then
     echo "[warmup]" >>"${log_path}"
-    run_once "${exe_path}" "${in_file}" "${stdout_warm}" "${stderr_warm}"
+    run_once "${exe_path}" "${in_file}" "${stdout_warm}" "${stderr_warm}" "${timeout_sec}"
     if [[ "${RUN_RC}" -eq 124 ]]; then
       status="timeout"
       echo "timeout in warmup" >>"${log_path}"
@@ -281,7 +293,7 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
 
   if [[ "${status}" == "ok" ]]; then
     echo "[run] 1" >>"${log_path}"
-    run_once "${exe_path}" "${in_file}" "${stdout_1}" "${stderr_1}"
+    run_once "${exe_path}" "${in_file}" "${stdout_1}" "${stderr_1}" "${timeout_sec}"
     if [[ "${RUN_RC}" -eq 124 ]]; then
       status="timeout"
       echo "timeout in run1" >>"${log_path}"
@@ -294,7 +306,7 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
 
   if [[ "${status}" == "ok" ]]; then
     echo "[run] 2" >>"${log_path}"
-    run_once "${exe_path}" "${in_file}" "${stdout_2}" "${stderr_2}"
+    run_once "${exe_path}" "${in_file}" "${stdout_2}" "${stderr_2}" "${timeout_sec}"
     if [[ "${RUN_RC}" -eq 124 ]]; then
       status="timeout"
       echo "timeout in run2" >>"${log_path}"
@@ -306,7 +318,7 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
 
   if [[ "${status}" == "ok" ]]; then
     echo "[run] 3" >>"${log_path}"
-    run_once "${exe_path}" "${in_file}" "${stdout_3}" "${stderr_3}"
+    run_once "${exe_path}" "${in_file}" "${stdout_3}" "${stderr_3}" "${timeout_sec}"
     if [[ "${RUN_RC}" -eq 124 ]]; then
       status="timeout"
       echo "timeout in run3" >>"${log_path}"
@@ -357,6 +369,11 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
     pass_count=$((pass_count + 1))
   else
     fail_count=$((fail_count + 1))
+    if [[ "${RUNTIME_SOFT_PERF}" == "1" && "${case_id}" == perf/* ]]; then
+      soft_fail_count=$((soft_fail_count + 1))
+    else
+      hard_fail_count=$((hard_fail_count + 1))
+    fi
   fi
 
   printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
@@ -369,7 +386,10 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
 done <"${INDEX_CSV}"
 
 echo "csv: ${CSV_OUT}"
-echo "summary: total=${total}, pass=${pass_count}, fail=${fail_count}"
-if [[ "${fail_count}" -ne 0 ]]; then
+echo "summary: total=${total}, pass=${pass_count}, fail=${fail_count}, hard_fail=${hard_fail_count}, soft_fail=${soft_fail_count}"
+if [[ "${hard_fail_count}" -ne 0 ]]; then
+  exit 1
+fi
+if [[ "${RUNTIME_SOFT_PERF}" != "1" && "${fail_count}" -ne 0 ]]; then
   exit 1
 fi

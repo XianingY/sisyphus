@@ -1,5 +1,6 @@
 #include "ArmPasses.h"
 #include "Regs.h"
+#include <algorithm>
 #include <unordered_set>
 
 using namespace sys;
@@ -226,8 +227,35 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
 
   region->updateLiveness();
 
+  // Build a coarse block hotness model for spill heuristics:
+  // back-edge blocks are likely loop bodies; call-like blocks are hotter.
+  std::unordered_map<BasicBlock*, int> bbIndex;
+  std::unordered_map<BasicBlock*, int> bbWeight;
+  int idx = 0;
+  for (auto bb : region->getBlocks())
+    bbIndex[bb] = idx++;
+  for (auto bb : region->getBlocks()) {
+    int w = 1;
+    auto term = bb->getLastOp();
+    bool hasBackEdge = false;
+    if (auto target = term->find<TargetAttr>())
+      hasBackEdge = hasBackEdge || (bbIndex[target->bb] <= bbIndex[bb]);
+    if (auto ifnot = term->find<ElseAttr>())
+      hasBackEdge = hasBackEdge || (bbIndex[ifnot->bb] <= bbIndex[bb]);
+    if (hasBackEdge)
+      w *= 8;
+    for (auto op : bb->getOps()) {
+      if (isa<BlOp>(op) || isa<CloneOp>(op) || isa<JoinOp>(op)) {
+        w *= 2;
+        break;
+      }
+    }
+    bbWeight[bb] = w;
+  }
+
   // Interference graph.
   std::unordered_map<Op*, std::set<Op*>> interf, spillInterf;
+  std::unordered_map<Op*, long long> spillWeight;
 
   // Values of readreg, or operands of writereg, or phis (mvs), are prioritzed.
   std::unordered_map<Op*, int> priority;
@@ -238,15 +266,19 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
 
   int currentPriority = 2;
   for (auto bb : region->getBlocks()) {
+    int localWeight = bbWeight[bb];
     // Scan through the block and see the place where the value's last used.
     std::map<Op*, int> lastUsed, defined;
     const auto &ops = bb->getOps();
     auto it = ops.end();
     for (int i = (int) ops.size() - 1; i >= 0; i--) {
       auto op = *--it;
+      spillWeight[op] += localWeight;
       for (auto v : op->getOperands()) {
         if (!lastUsed.count(v.defining))
           lastUsed[v.defining] = i;
+        // Read pressure matters more than pure definition count.
+        spillWeight[v.defining] += 2LL * localWeight;
       }
       defined[op] = i;
 
@@ -265,7 +297,7 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       
       if (isa<MovIOp>(op) && (V(op) <= 32767 && V(op) >= -32768))
         priority[op] = -2;
-      
+
       if (isa<PhiOp>(op)) {
         priority[op] = currentPriority + 1;
         for (auto x : op->getOperands()) {
@@ -326,18 +358,31 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
   }
 
   std::vector<Op*> ops;
+  std::unordered_set<Op*> visitedOps;
   for (auto [k, v] : interf)
-    ops.push_back(k);
+    if (!visitedOps.count(k)) {
+      ops.push_back(k);
+      visitedOps.insert(k);
+    }
   // Even though registers in `priority` might not be colliding,
   // we still allocate them here to respect their preference.
   for (auto [k, v] : priority)
-    ops.push_back(k);
+    if (!visitedOps.count(k)) {
+      ops.push_back(k);
+      visitedOps.insert(k);
+    }
 
   // Sort by **descending** degree.
   std::sort(ops.begin(), ops.end(), [&](Op *a, Op *b) {
     auto pa = priority[a];
     auto pb = priority[b];
-    return pa == pb ? interf[a].size() > interf[b].size() : pa > pb;
+    if (pa != pb)
+      return pa > pb;
+    if (spillWeight[a] != spillWeight[b])
+      return spillWeight[a] > spillWeight[b];
+    if (interf[a].size() != interf[b].size())
+      return interf[a].size() > interf[b].size();
+    return a < b;
   });
 
   std::unordered_map<Op*, int> spillOffset;
@@ -847,10 +892,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       continue;
 
     // Now emit all cycles.
-    std::cerr << "remark: cycle detected at bb" << bbmap[bb] << "\n";
     for (auto header : headers) {
-      const auto &cycle = members[header];
-      assert(!cycle.empty());
+      assert(!members[header].empty());
 
       // Move the header's value to temp.
       Reg headerSrc = moveGraph[header];

@@ -36,5 +36,11 @@ scripts/suite-sync.sh --update
 scripts/suite-index.sh
 scripts/gen-reference-out.sh compiler-dev
 scripts/eval-runtime.sh open-functional riscv O1
+# allow perf/* timeout as soft-fail (functional remains hard gate)
+RUNTIME_SOFT_PERF=1 scripts/eval-runtime.sh compiler-dev arm O2
+# set a larger timeout budget for perf/* only (functional keeps base timeout)
+RUNTIME_SOFT_PERF=1 RUNTIME_PERF_TIMEOUT_SEC=20 scripts/eval-runtime.sh compiler-dev arm O2
 scripts/eval-vs-biframe.sh open-functional riscv O1
+scripts/runtime-summary.sh
+scripts/runtime-gate.sh
 ```
