@@ -22,6 +22,7 @@ struct Options {
     option dumpPassTiming : 1;
     option verify : 1;
     option enableExperimental : 1;
+    option disableO2Experimental : 1;
     option disableLoopRotate : 1;
     option disableConstUnroll : 1;
     option bv : 1;

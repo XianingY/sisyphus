@@ -74,6 +74,8 @@ void initCorePipelineO0(sys::PassManager &pm) {
 }
 
 void initCorePipelineO1(sys::PassManager &pm, bool aggressive) {
+  const bool enableO2Experimental = aggressive && !opts.disableO2Experimental;
+
   pm.addPass<sys::MoveAlloca>();
 
   // ===== Structured control flow =====
@@ -181,9 +183,9 @@ void initCorePipelineO1(sys::PassManager &pm, bool aggressive) {
   pm.addPass<sys::DLE>();
   pm.addPass<sys::DCE>();
   pm.addPass<sys::InlineStore>();
-  if (aggressive && opts.enableExperimental)
+  if (enableO2Experimental)
     pm.addPass<sys::Cached>();
-  if (opts.enableExperimental)
+  if (enableO2Experimental)
     pm.addPass<sys::SynthConstArray>();
   pm.addPass<sys::RegularFold>();
   pm.addPass<sys::DCE>();
@@ -210,6 +212,14 @@ void initCorePipelineO1(sys::PassManager &pm, bool aggressive) {
 
   // ===== Final Cleanup =====
 
+  if (aggressive) {
+    pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
+    pm.addPass<sys::LICM>();
+    pm.addPass<sys::SCEV>();
+    pm.addPass<sys::GVN>();
+    pm.addPass<sys::RegularFold>();
+    pm.addPass<sys::DCE>();
+  }
   pm.addPass<sys::AggressiveDCE>();
   pm.addPass<sys::SimplifyCFG>();
   pm.addPass<sys::InstSchedule>();

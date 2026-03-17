@@ -82,9 +82,8 @@ void LoopRotate::runImpl(LoopInfo *info) {
     const auto &ops = phi->getOperands();
     const auto &attrs = phi->getAttrs();
     
-    if (attrs.size() < 2)
-      continue;
-    assert(attrs.size() == 2);
+    if (attrs.size() != 2)
+      return;
     
     auto bb1 = cast<FromAttr>(attrs[0])->bb;
     if (bb1 == latch) {
@@ -96,6 +95,23 @@ void LoopRotate::runImpl(LoopInfo *info) {
     if (bb2 == latch){
       valueMap[phi] = ops[1].defining;
       initMap[phi] = ops[0].defining;
+    }
+  }
+  if (!valueMap.count(induction))
+    return;
+
+  // Be conservative: only rotate when exit phis fed from header are direct
+  // header-phi values that we can rewrite consistently.
+  auto exitPhis = exit->getPhis();
+  for (auto phi : exitPhis) {
+    const auto &ops = phi->getOperands();
+    const auto &attrs = phi->getAttrs();
+    for (size_t i = 0; i < ops.size(); i++) {
+      if (cast<FromAttr>(attrs[i])->bb != header)
+        continue;
+      auto def = ops[i].defining;
+      if (!valueMap.count(def) || !initMap.count(def))
+        return;
     }
   }
 
