@@ -289,7 +289,9 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
   stderr_3="${tmp_dir}/run3.err"
   actual_file="${tmp_dir}/actual.out"
   timeout_sec="${RUNTIME_TIMEOUT_SEC}"
-  if [[ "${case_id}" == perf/* ]]; then
+  is_perf_case=0
+  if [[ "${suite}" == "open-perf" || "${kind}" == "perf" || "${case_id}" == perf/* ]]; then
+    is_perf_case=1
     timeout_sec="${RUNTIME_PERF_TIMEOUT_SEC}"
   fi
 
@@ -425,7 +427,7 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
     pass_count=$((pass_count + 1))
   else
     fail_count=$((fail_count + 1))
-    if [[ "${RUNTIME_SOFT_PERF}" == "1" && "${case_id}" == perf/* ]]; then
+    if [[ "${RUNTIME_SOFT_PERF}" == "1" && "${is_perf_case}" == "1" ]]; then
       soft_fail_count=$((soft_fail_count + 1))
     else
       hard_fail_count=$((hard_fail_count + 1))
