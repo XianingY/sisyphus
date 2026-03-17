@@ -57,10 +57,30 @@ END {
 printf 'profile,mtime,path\n' >"${SUMMARY_DIR}/latest-index.csv"
 cat "${latest_tmp}" >>"${SUMMARY_DIR}/latest-index.csv"
 
-printf 'profile,suite,target,opt,total,pass,fail,functional_total,functional_pass,functional_fail,perf_total,perf_pass,perf_fail,timeout_count,pass_rate,functional_pass_rate,perf_pass_rate,path\n' \
+printf 'profile,suite,target,opt,total,pass,fail,functional_total,functional_pass,functional_fail,perf_total,perf_pass,perf_fail,timeout_count,compile_fail_count,compile_crash_count,link_fail_count,median_ms,p90_ms,pass_rate,functional_pass_rate,perf_pass_rate,path\n' \
   >"${SUMMARY_DIR}/overview-by-profile.csv"
 
+calc_quantile_ms() {
+  local csv="$1"
+  local q="$2"
+  awk -F, 'NR > 1 && $8 == "1" && $9 != "" { print $9 }' "${csv}" \
+    | sort -n \
+    | awk -v q="${q}" '
+      { a[++n] = $1 }
+      END {
+        if (n == 0) { printf "0.000"; exit; }
+        idx = int((n - 1) * q + 0.999999) + 1;
+        if (idx < 1) idx = 1;
+        if (idx > n) idx = n;
+        printf "%.3f", a[idx];
+      }
+    '
+}
+
 hard_fail_total=0
+compile_fail_total=0
+compile_crash_total=0
+link_fail_total=0
 while IFS=, read -r profile mtime path; do
   opt="${profile##*-}"
   rest="${profile%-*}"
@@ -68,13 +88,16 @@ while IFS=, read -r profile mtime path; do
   suite="${rest%-*}"
 
   # shellcheck disable=SC2016
-  read -r total pass fail ftotal fpass ffail ptotal ppass pfail timeout_count pass_rate fpass_rate ppass_rate <<EOF
+  read -r total pass fail ftotal fpass ffail ptotal ppass pfail timeout_count compile_fail_count compile_crash_count link_fail_count pass_rate fpass_rate ppass_rate <<EOF
 $(awk -F, '
 BEGIN {
   total=0; pass=0; fail=0;
   ftotal=0; fpass=0; ffail=0;
   ptotal=0; ppass=0; pfail=0;
   timeout_count=0;
+  compile_fail_count=0;
+  compile_crash_count=0;
+  link_fail_count=0;
 }
 NR == 1 { next }
 {
@@ -83,6 +106,9 @@ NR == 1 { next }
   is_perf = (index($2, "perf/") == 1) || ($1 == "open-perf");
   if (is_pass) pass++; else fail++;
   if ($6 == "timeout") timeout_count++;
+  if ($6 == "compile_fail") compile_fail_count++;
+  if ($6 == "compile_crash") compile_crash_count++;
+  if ($6 == "link_fail") link_fail_count++;
 
   if (is_perf) {
     ptotal++;
@@ -96,12 +122,16 @@ END {
   pass_rate = (total == 0 ? 0 : pass / total);
   fpass_rate = (ftotal == 0 ? 0 : fpass / ftotal);
   ppass_rate = (ptotal == 0 ? 0 : ppass / ptotal);
-  printf "%d %d %d %d %d %d %d %d %d %d %.6f %.6f %.6f\n",
+  printf "%d %d %d %d %d %d %d %d %d %d %d %d %d %.6f %.6f %.6f\n",
     total, pass, fail, ftotal, fpass, ffail, ptotal, ppass, pfail, timeout_count,
+    compile_fail_count, compile_crash_count, link_fail_count,
     pass_rate, fpass_rate, ppass_rate;
 }
 ' "${path}")
 EOF
+
+  median_ms="$(calc_quantile_ms "${path}" 0.5)"
+  p90_ms="$(calc_quantile_ms "${path}" 0.9)"
 
   gate_this=0
   IFS=',' read -r -a gate_opts <<<"${SUMMARY_GATE_OPTS}"
@@ -113,12 +143,17 @@ EOF
   done
   if [[ "${gate_this}" -eq 1 ]]; then
     hard_fail_total=$((hard_fail_total + ffail))
+    compile_fail_total=$((compile_fail_total + compile_fail_count))
+    compile_crash_total=$((compile_crash_total + compile_crash_count))
+    link_fail_total=$((link_fail_total + link_fail_count))
   fi
 
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%.6f,%.6f,%.6f,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%.3f,%.3f,%.6f,%.6f,%.6f,%s\n' \
     "${profile}" "${suite}" "${target}" "${opt}" \
     "${total}" "${pass}" "${fail}" "${ftotal}" "${fpass}" "${ffail}" \
     "${ptotal}" "${ppass}" "${pfail}" "${timeout_count}" \
+    "${compile_fail_count}" "${compile_crash_count}" "${link_fail_count}" \
+    "${median_ms}" "${p90_ms}" \
     "${pass_rate}" "${fpass_rate}" "${ppass_rate}" "${path}" \
     >>"${SUMMARY_DIR}/overview-by-profile.csv"
 
@@ -130,6 +165,10 @@ EOF
   out_timeout="${SUMMARY_DIR}/timeouts-${profile}.txt"
   awk -F, 'NR > 1 && $6 == "timeout" { printf "%s status=%s pass=%s median=%s log=%s\n", $2, $6, $8, $9, $16 }' "${path}" \
     >"${out_timeout}"
+
+  out_stage_fail="${SUMMARY_DIR}/stage-failures-${profile}.txt"
+  awk -F, 'NR > 1 && ($6 == "compile_fail" || $6 == "compile_crash" || $6 == "link_fail") { printf "%s status=%s pass=%s log=%s\n", $2, $6, $8, $16 }' "${path}" \
+    >"${out_stage_fail}"
 done <"${latest_tmp}"
 
 printf 'suite,target,case_id,o1_ms,o2_ms,delta_ms\n' >"${SUMMARY_DIR}/o2-vs-o1-regressed-top20.csv"
@@ -173,6 +212,9 @@ status_file="${SUMMARY_DIR}/gate-status.txt"
   echo "gate_opts=${SUMMARY_GATE_OPTS}"
   echo "generated_at=$(date -Iseconds)"
   echo "hard_fail_total=${hard_fail_total}"
+  echo "compile_fail_total=${compile_fail_total}"
+  echo "compile_crash_total=${compile_crash_total}"
+  echo "link_fail_total=${link_fail_total}"
   if [[ "${hard_fail_total}" -eq 0 ]]; then
     echo "functional_hard_gate=PASS"
   else

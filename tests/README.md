@@ -7,6 +7,7 @@
 ```bash
 scripts/run_smoke.sh
 scripts/run_frontend_regressions.sh
+scripts/run_arm_o2_fft_regressions.sh
 ```
 
 For batch compilation against a local SysY case directory:
@@ -42,6 +43,7 @@ scripts/eval-runtime.sh open-functional riscv O1
 RUNTIME_SOFT_PERF=1 scripts/eval-runtime.sh compiler-dev arm O2
 # set a larger timeout budget for perf/* only (functional keeps base timeout)
 RUNTIME_SOFT_PERF=1 RUNTIME_PERF_TIMEOUT_SEC=20 scripts/eval-runtime.sh compiler-dev arm O2
+scripts/eval-hotspots.sh arm O2 20
 scripts/eval-vs-biframe.sh open-functional riscv O1
 scripts/runtime-summary.sh
 scripts/runtime-gate.sh
