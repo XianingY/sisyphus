@@ -27,6 +27,7 @@ struct Options {
     option disableConstUnroll : 1;
     option enableHIRPipeline : 1;
     option useLegacyCodegen : 1;
+    option forceDialectCodegen : 1;
     option dumpHIR : 1;
     option dumpCFG : 1;
     option verifyHIR : 1;
@@ -41,6 +42,7 @@ struct Options {
   std::string printBefore;
   std::string compareWith;
   std::string simulateInput;
+  std::string dialectFallbackReport;
   int inlineThreshold;
   int lateInlineThreshold;
   bool inlineThresholdExplicit;

@@ -222,6 +222,37 @@ int main(int argc, char **argv) {
   bool dumpCFG = opts.dumpCFG;
   if (const char *env = std::getenv("SISY_DUMP_CFG"))
     dumpCFG = dumpCFG || (env[0] && std::strcmp(env, "0") != 0);
+  auto emitDialectReport = [&](const std::string &frontendPath, const std::vector<std::string> &reasons) {
+    if (opts.dialectFallbackReport.empty())
+      return;
+
+    std::ostringstream body;
+    body << "frontend_path=" << frontendPath << "\n";
+    body << "fallback_reason_codes=";
+    if (reasons.empty())
+      body << "none";
+    else {
+      for (size_t i = 0; i < reasons.size(); i++) {
+        if (i)
+          body << ",";
+        body << reasons[i];
+      }
+    }
+    body << "\n";
+    body << "force_dialect_codegen=" << (opts.forceDialectCodegen ? 1 : 0) << "\n";
+    body << "input_file=" << opts.inputFile << "\n";
+
+    if (opts.dialectFallbackReport == "stderr") {
+      std::istringstream iss(body.str());
+      std::string line;
+      while (std::getline(iss, line))
+        std::cerr << "[dialect-report] " << line << "\n";
+      return;
+    }
+
+    std::ofstream ofs(opts.dialectFallbackReport);
+    ofs << body.str();
+  };
   auto requiresLegacyFallback = [&](const sys::hir::Module &mod, std::vector<std::string> &reasons) {
     reasons.clear();
     std::unordered_set<std::string> seen;
@@ -237,20 +268,16 @@ int main(int argc, char **argv) {
 
       if (op->kind == sys::hir::OpKind::VarDecl) {
         if (auto *var = sys::dyn_cast<sys::VarDeclNode>(op->origin)) {
-          if (var->global && seen.insert("global-vardecl").second)
-            reasons.push_back("global variable declaration");
-          if (var->init && (sys::isa<sys::ConstArrayNode>(var->init) || sys::isa<sys::LocalArrayNode>(var->init)) &&
-              seen.insert("array-init").second)
-            reasons.push_back("array initializer");
+          bool arrayInit = var->init && (sys::isa<sys::ConstArrayNode>(var->init) || sys::isa<sys::LocalArrayNode>(var->init));
+          if (arrayInit && seen.insert("array_init").second)
+            reasons.push_back("array_init");
         }
-        if (!op->arrayDims.empty() && seen.insert("array-decl").second)
-          reasons.push_back("array declaration");
       }
 
       if ((op->kind == sys::hir::OpKind::Load || op->kind == sys::hir::OpKind::Store) &&
           (op->type == sys::hir::TypeKind::Array || op->type == sys::hir::TypeKind::Pointer) &&
-          seen.insert("ptr-array-memory").second)
-        reasons.push_back("pointer/array memory access");
+          seen.insert("ptr_array_memory").second)
+        reasons.push_back("ptr_array_memory");
 
       for (const auto &child : op->children)
         if (child)
@@ -259,7 +286,11 @@ int main(int argc, char **argv) {
     return !reasons.empty();
   };
 
+  std::string frontendPath = "dialect";
+  std::vector<std::string> fallbackReasons;
   if (opts.useLegacyCodegen) {
+    frontendPath = "legacy-forced";
+    emitDialectReport(frontendPath, fallbackReasons);
     cg = std::make_unique<sys::CodeGen>(node);
   } else {
     runStage("hir.build", [&]() {
@@ -302,14 +333,23 @@ int main(int argc, char **argv) {
       });
     }
 
-    std::vector<std::string> fallbackReasons;
     if (requiresLegacyFallback(*hirModule, fallbackReasons)) {
+      if (opts.forceDialectCodegen) {
+        frontendPath = "dialect";
+        emitDialectReport(frontendPath, fallbackReasons);
+        failStage("dialect-forced-fallback", fallbackReasons, "");
+      }
       if (opts.verbose || opts.stats) {
         std::cerr << "[dialect-fallback] switch to legacy codegen due to:\n";
         for (const auto &r : fallbackReasons)
           std::cerr << "  - " << r << "\n";
       }
+      frontendPath = "legacy-fallback";
+      emitDialectReport(frontendPath, fallbackReasons);
       cg = std::make_unique<sys::CodeGen>(node);
+    } else {
+      frontendPath = "dialect";
+      emitDialectReport(frontendPath, fallbackReasons);
     }
 
     if (!cg) {

@@ -31,6 +31,7 @@ Options::Options() {
   disableConstUnroll = false;
   enableHIRPipeline = true;
   useLegacyCodegen = false;
+  forceDialectCodegen = false;
   dumpHIR = false;
   dumpCFG = false;
   verifyHIR = true;
@@ -196,6 +197,20 @@ Options sys::parseArgs(int argc, char **argv) {
       continue;
     }
     PARSEOPT("--use-legacy-codegen", useLegacyCodegen);
+    PARSEOPT("--force-dialect-codegen", forceDialectCodegen);
+    if (strcmp(argv[i], "--dialect-fallback-report") == 0) {
+      opts.dialectFallbackReport = requireValue(i, "--dialect-fallback-report");
+      i++;
+      continue;
+    }
+    if (strncmp(argv[i], "--dialect-fallback-report=", 26) == 0) {
+      opts.dialectFallbackReport = argv[i] + 26;
+      if (opts.dialectFallbackReport.empty()) {
+        std::cerr << "error: --dialect-fallback-report requires stderr|<path>\n";
+        exit(1);
+      }
+      continue;
+    }
     PARSEOPT("--dump-hir", dumpHIR);
     PARSEOPT("--dump-cfg", dumpCFG);
     PARSEOPT("--verify-hir", verifyHIR);
@@ -246,6 +261,10 @@ Options sys::parseArgs(int argc, char **argv) {
     opts.enableHIRPipeline = false;
   if (!opts.enableHIRPipeline)
     opts.useLegacyCodegen = true;
+  if (opts.forceDialectCodegen && opts.useLegacyCodegen) {
+    std::cerr << "error: --force-dialect-codegen conflicts with --use-legacy-codegen/--disable-hir-pipeline\n";
+    exit(1);
+  }
 
   if (!opts.inlineThresholdExplicit) {
     if (opts.o2)
@@ -269,7 +288,8 @@ Options sys::parseArgs(int argc, char **argv) {
       << "usage: compiler <input.sy> -S -o <output.s> [-O0|-O1|-O2] [--target=riscv|arm]\n"
       << "       [--inline-threshold=N] [--late-inline-threshold=N]\n"
       << "       [--disable-o2-experimental]\n"
-      << "       [--enable-hir-pipeline|--disable-hir-pipeline|--use-legacy-codegen]\n"
+      << "       [--enable-hir-pipeline|--disable-hir-pipeline|--use-legacy-codegen|--force-dialect-codegen]\n"
+      << "       [--dialect-fallback-report=stderr|<path>]\n"
       << "       [--dump-hir] [--dump-cfg] [--verify-hir] [--verify-cfg]\n"
       << "       [--disable-loop-rotate|--enable-loop-rotate] [--disable-const-unroll]\n"
       << "       compiler <input.sy> -S -o <output.s> --emit-ir --verify-ir\n";
