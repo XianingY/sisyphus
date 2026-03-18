@@ -29,6 +29,7 @@ Options::Options() {
   disableO2Experimental = false;
   disableLoopRotate = false;
   disableConstUnroll = false;
+  enableHIRPipeline = false;
   sat = false;
   bv = false;
   inlineThreshold = 200;
@@ -183,6 +184,7 @@ Options sys::parseArgs(int argc, char **argv) {
     PARSEOPT("--dump-pass-timing", dumpPassTiming);
     PARSEOPT("--enable-experimental", enableExperimental);
     PARSEOPT("--disable-o2-experimental", disableO2Experimental);
+    PARSEOPT("--enable-hir-pipeline", enableHIRPipeline);
     if (strcmp(argv[i], "--disable-loop-rotate") == 0) {
       opts.disableLoopRotate = true;
       opts.loopRotateExplicit = true;
@@ -248,6 +250,7 @@ Options sys::parseArgs(int argc, char **argv) {
       << "usage: compiler <input.sy> -S -o <output.s> [-O0|-O1|-O2] [--target=riscv|arm]\n"
       << "       [--inline-threshold=N] [--late-inline-threshold=N]\n"
       << "       [--disable-o2-experimental]\n"
+      << "       [--enable-hir-pipeline]\n"
       << "       [--disable-loop-rotate|--enable-loop-rotate] [--disable-const-unroll]\n"
       << "       compiler <input.sy> -S -o <output.s> --emit-ir --verify-ir\n";
     exit(1);

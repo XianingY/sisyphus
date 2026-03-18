@@ -208,6 +208,27 @@ normalize_text() {
   awk '{ sub(/[ \t\r]+$/, "", $0); print }' "${file}"
 }
 
+count_input_tokens() {
+  local in_file="$1"
+  if [[ -f "${in_file}" ]]; then
+    awk '{
+      for (i = 1; i <= NF; i++)
+        c++;
+    } END { print c + 0 }' "${in_file}"
+  else
+    echo "0"
+  fi
+}
+
+estimate_scalar_reads() {
+  local src="$1"
+  if [[ ! -f "${src}" ]]; then
+    echo "0"
+    return
+  fi
+  (grep -Eo '\<(getint|getfloat|getch)[[:space:]]*\(' "${src}" || true) | wc -l | tr -d ' '
+}
+
 run_once() {
   local exe="$1"
   local in_file="$2"
@@ -262,7 +283,7 @@ compile_case() {
   fi
 }
 
-printf 'suite,case_id,target,opt,label,status,compare,pass,median_ms,warmup_ms,run1_ms,run2_ms,run3_ms,asm,exe,log,compile_status,asm_emit_status,link_status\n' >"${CSV_OUT}"
+printf 'suite,case_id,target,opt,label,status,compare,pass,median_ms,warmup_ms,run1_ms,run2_ms,run3_ms,asm,exe,log,compile_status,asm_emit_status,link_status,input_token_count,estimated_read_count,suspect_input_underflow\n' >"${CSV_OUT}"
 
 asm_root="${RUNTIME_ROOT}/asm/${SUITE}/${LABEL}/${TARGET}-${OPT}"
 bin_root="${RUNTIME_ROOT}/bin/${SUITE}/${LABEL}/${TARGET}-${OPT}"
@@ -305,6 +326,9 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
   run2_ms=""
   run3_ms=""
   median_ms=""
+  input_token_count="0"
+  estimated_read_count="0"
+  suspect_input_underflow="0"
 
   tmp_dir="$(mktemp -d "${log_root}/tmp.XXXXXX")"
   stdout_warm="${tmp_dir}/warm.out"
@@ -322,9 +346,17 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
     is_perf_case=1
     timeout_sec="${RUNTIME_PERF_TIMEOUT_SEC}"
   fi
+  input_token_count="$(count_input_tokens "${in_file}")"
+  estimated_read_count="$(estimate_scalar_reads "${src}")"
+  if [[ "${estimated_read_count}" -gt "${input_token_count}" ]]; then
+    suspect_input_underflow="1"
+  fi
 
   echo "[case] ${case_id}" >"${log_path}"
   echo "[timeout] ${timeout_sec}s" >>"${log_path}"
+  echo "[input_tokens] ${input_token_count}" >>"${log_path}"
+  echo "[estimated_scalar_reads] ${estimated_read_count}" >>"${log_path}"
+  echo "[suspect_input_underflow] ${suspect_input_underflow}" >>"${log_path}"
   echo "[compile] ${src}" >>"${log_path}"
   set +e
   compile_case "${src}" "${asm_path}" >>"${log_path}" 2>&1
@@ -462,11 +494,12 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
     fi
   fi
 
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "${SUITE}" "${case_id}" "${TARGET}" "${OPT}" "${LABEL}" \
     "${status}" "${compare_status}" "${pass}" "${median_ms}" "${warmup_ms}" \
     "${run1_ms}" "${run2_ms}" "${run3_ms}" "${asm_path}" "${exe_path}" "${log_path}" \
     "${compile_status}" "${asm_emit_status}" "${link_status}" \
+    "${input_token_count}" "${estimated_read_count}" "${suspect_input_underflow}" \
     >>"${CSV_OUT}"
 
   rm -rf "${tmp_dir}"

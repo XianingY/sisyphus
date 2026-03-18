@@ -57,7 +57,7 @@ END {
 printf 'profile,mtime,path\n' >"${SUMMARY_DIR}/latest-index.csv"
 cat "${latest_tmp}" >>"${SUMMARY_DIR}/latest-index.csv"
 
-printf 'profile,suite,target,opt,total,pass,fail,functional_total,functional_pass,functional_fail,perf_total,perf_pass,perf_fail,timeout_count,compile_fail_count,compile_crash_count,link_fail_count,median_ms,p90_ms,pass_rate,functional_pass_rate,perf_pass_rate,path\n' \
+printf 'profile,suite,target,opt,total,pass,fail,functional_total,functional_pass,functional_fail,perf_total,perf_pass,perf_fail,timeout_count,compile_fail_count,compile_crash_count,link_fail_count,median_ms,p90_ms,pass_rate,sanitized_total,sanitized_pass,sanitized_fail,sanitized_pass_rate,functional_pass_rate,perf_pass_rate,path\n' \
   >"${SUMMARY_DIR}/overview-by-profile.csv"
 
 calc_quantile_ms() {
@@ -89,12 +89,13 @@ while IFS=, read -r profile mtime path; do
   suite="${rest%-*}"
 
   # shellcheck disable=SC2016
-  read -r total pass fail ftotal fpass ffail ptotal ppass pfail timeout_count compile_fail_count compile_crash_count link_fail_count pass_rate fpass_rate ppass_rate <<EOF
+  read -r total pass fail ftotal fpass ffail ptotal ppass pfail timeout_count compile_fail_count compile_crash_count link_fail_count pass_rate sanitized_total sanitized_pass sanitized_fail sanitized_pass_rate fpass_rate ppass_rate <<EOF
 $(awk -F, '
 BEGIN {
   total=0; pass=0; fail=0;
   ftotal=0; fpass=0; ffail=0;
   ptotal=0; ppass=0; pfail=0;
+  sanitized_total=0; sanitized_pass=0; sanitized_fail=0;
   timeout_count=0;
   compile_fail_count=0;
   compile_crash_count=0;
@@ -110,6 +111,11 @@ NR == 1 { next }
   if ($6 == "compile_fail") compile_fail_count++;
   if ($6 == "compile_crash") compile_crash_count++;
   if ($6 == "link_fail") link_fail_count++;
+  is_suspect = (NF >= 22 && $22 == "1");
+  if (!is_suspect) {
+    sanitized_total++;
+    if (is_pass) sanitized_pass++; else sanitized_fail++;
+  }
 
   if (is_perf) {
     ptotal++;
@@ -121,12 +127,13 @@ NR == 1 { next }
 }
 END {
   pass_rate = (total == 0 ? 0 : pass / total);
+  sanitized_pass_rate = (sanitized_total == 0 ? 0 : sanitized_pass / sanitized_total);
   fpass_rate = (ftotal == 0 ? 0 : fpass / ftotal);
   ppass_rate = (ptotal == 0 ? 0 : ppass / ptotal);
-  printf "%d %d %d %d %d %d %d %d %d %d %d %d %d %.6f %.6f %.6f\n",
+  printf "%d %d %d %d %d %d %d %d %d %d %d %d %d %.6f %d %d %d %.6f %.6f %.6f\n",
     total, pass, fail, ftotal, fpass, ffail, ptotal, ppass, pfail, timeout_count,
     compile_fail_count, compile_crash_count, link_fail_count,
-    pass_rate, fpass_rate, ppass_rate;
+    pass_rate, sanitized_total, sanitized_pass, sanitized_fail, sanitized_pass_rate, fpass_rate, ppass_rate;
 }
 ' "${path}")
 EOF
@@ -152,13 +159,14 @@ EOF
     link_fail_total=$((link_fail_total + link_fail_count))
   fi
 
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%.3f,%.3f,%.6f,%.6f,%.6f,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%.3f,%.3f,%.6f,%s,%s,%s,%.6f,%.6f,%.6f,%s\n' \
     "${profile}" "${suite}" "${target}" "${opt}" \
     "${total}" "${pass}" "${fail}" "${ftotal}" "${fpass}" "${ffail}" \
     "${ptotal}" "${ppass}" "${pfail}" "${timeout_count}" \
     "${compile_fail_count}" "${compile_crash_count}" "${link_fail_count}" \
     "${median_ms}" "${p90_ms}" \
-    "${pass_rate}" "${fpass_rate}" "${ppass_rate}" "${path}" \
+    "${pass_rate}" "${sanitized_total}" "${sanitized_pass}" "${sanitized_fail}" \
+    "${sanitized_pass_rate}" "${fpass_rate}" "${ppass_rate}" "${path}" \
     >>"${SUMMARY_DIR}/overview-by-profile.csv"
 
   out_slowest="${SUMMARY_DIR}/slowest-top20-${profile}.csv"

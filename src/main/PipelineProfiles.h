@@ -22,6 +22,7 @@ struct PipelinePlan {
   int o2LoopRounds;
   bool useArmBackend;
   bool useRvBackend;
+  bool useHIRFrontend;
 };
 
 PipelinePlan selectPlan(const Options &opts);

@@ -282,6 +282,7 @@ PipelinePlan selectPlan(const Options &opts) {
   plan.o2LoopRounds = getenvPositive("SISY_O2_LOOP_ROUNDS", 3, 1, 8);
   plan.useArmBackend = opts.arm;
   plan.useRvBackend = opts.rv;
+  plan.useHIRFrontend = opts.enableHIRPipeline;
   return plan;
 }
 
@@ -311,6 +312,7 @@ std::string formatPlan(const PipelinePlan &plan) {
       << ", o2_experimental=" << (plan.enableO2Experimental ? "1" : "0")
       << ", o2_heavy=" << (plan.enableO2Heavy ? "1" : "0")
       << ", o2_loop_rounds=" << plan.o2LoopRounds
+      << ", hir_frontend=" << (plan.useHIRFrontend ? "1" : "0")
       << ", backend=[";
   bool first = true;
   if (plan.useArmBackend) {

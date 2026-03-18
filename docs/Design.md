@@ -26,8 +26,17 @@ Additional controls:
 - `--inline-threshold`, `--late-inline-threshold`
 - `--disable-loop-rotate`, `--enable-loop-rotate`, `--disable-const-unroll`
 - `--enable-experimental` (kept opt-in)
+- `--enable-hir-pipeline` (enable staged HIR frontend path)
 
 ## Pipeline
+
+### Frontend Staging (optional)
+
+When `--enable-hir-pipeline` is set:
+
+- `AST -> HIR Build -> HIR Verify -> HIR Canonicalize -> HIR Verify -> Lower to legacy CFG/SSA IR`
+- Stage boundaries emit timing with `--dump-pass-timing` as `[hir-stage] ...`
+- Default path remains unchanged to preserve baseline stability
 
 ### O0 (stable baseline)
 

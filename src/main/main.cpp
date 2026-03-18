@@ -4,8 +4,14 @@
 #include <sstream>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <vector>
 
 #include "../frontend/FrontendFacade.h"
+#include "../hir/HIRBuilder.h"
+#include "../hir/HIRVerifier.h"
+#include "../hir/HIRCanonicalize.h"
+#include "../hir/HIRLowering.h"
 #include "../pass/PassRegistry.h"
 #include "../utils/smt/SMT.h"
 
@@ -174,10 +180,70 @@ int main(int argc, char **argv) {
   sys::ASTNode *node = parser.parse();
   sys::Sema sema(node, ctx);
 
-  sys::CodeGen cg(node);
+  std::unique_ptr<sys::CodeGen> cg;
+  std::unique_ptr<sys::hir::Module> hirModule;
+  auto runStage = [&](const char *stageName, auto &&fn) {
+    auto start = std::chrono::steady_clock::now();
+    fn();
+    if (opts.dumpPassTiming) {
+      auto end = std::chrono::steady_clock::now();
+      double ms = std::chrono::duration<double, std::milli>(end - start).count();
+      std::cerr << "[hir-stage] " << stageName << " : " << ms << " ms\n";
+    }
+  };
+
+  if (opts.enableHIRPipeline) {
+    runStage("build", [&]() {
+      sys::hir::Builder builder;
+      hirModule = std::make_unique<sys::hir::Module>(builder.build(node));
+    });
+    if (const char *env = std::getenv("SISY_DUMP_HIR")) {
+      if (env[0] && std::strcmp(env, "0") != 0) {
+        std::cerr << "===== HIR =====\n";
+        sys::hir::dump(*hirModule, std::cerr);
+      }
+    }
+    runStage("verify.pre", [&]() {
+      std::vector<std::string> errors;
+      if (!sys::hir::verify(*hirModule, errors)) {
+        std::cerr << "[hir-stage-fail] file=" << opts.inputFile << " stage=verify.pre\n";
+        std::cerr << "hir verification failed before canonicalize:\n";
+        for (const auto &e : errors)
+          std::cerr << "  - " << e << "\n";
+        std::exit(1);
+      }
+    });
+    runStage("canonicalize", [&]() {
+      sys::hir::Canonicalizer canonicalizer;
+      auto stats = canonicalizer.run(*hirModule);
+      if (opts.verbose || opts.stats) {
+        std::cerr << "[hir] const_folded=" << stats.constFolded
+                  << " dead_branches=" << stats.deadBranchesEliminated << "\n";
+      }
+    });
+    runStage("verify.post", [&]() {
+      std::vector<std::string> errors;
+      if (!sys::hir::verify(*hirModule, errors)) {
+        std::cerr << "[hir-stage-fail] file=" << opts.inputFile << " stage=verify.post\n";
+        std::cerr << "hir verification failed after canonicalize:\n";
+        for (const auto &e : errors)
+          std::cerr << "  - " << e << "\n";
+        std::exit(1);
+      }
+    });
+    runStage("lower", [&]() {
+      cg = sys::hir::lowerToLegacyIR(*hirModule, node);
+      if (!cg) {
+        std::cerr << "hir lowering failed: missing source ast\n";
+        std::exit(1);
+      }
+    });
+  } else {
+    cg = std::make_unique<sys::CodeGen>(node);
+  }
   delete node;
 
-  sys::ModuleOp *module = cg.getModule();
+  sys::ModuleOp *module = cg->getModule();
   if (opts.dumpMidIR) {
     if (opts.emitIR)
       std::cerr << "===== Initial IR =====\n";

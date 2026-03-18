@@ -25,6 +25,7 @@ struct Options {
     option disableO2Experimental : 1;
     option disableLoopRotate : 1;
     option disableConstUnroll : 1;
+    option enableHIRPipeline : 1;
     option bv : 1;
     option sat : 1;
   };
