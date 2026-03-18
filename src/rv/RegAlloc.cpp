@@ -1,12 +1,23 @@
 #include "RvPasses.h"
 #include "Regs.h"
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <unordered_set>
 
 using namespace sys;
 using namespace sys::rv;
 
 namespace {
+
+bool envEnabled(const char *name, bool fallback = true) {
+  const char *v = std::getenv(name);
+  if (!v || !v[0])
+    return fallback;
+  if (std::strcmp(v, "0") == 0 || std::strcmp(v, "false") == 0)
+    return false;
+  return true;
+}
 
 class SpilledRdAttr : public AttrImpl<SpilledRdAttr, RVLINE + 2097152> {
 public:
@@ -520,22 +531,29 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
 
     auto rcnt = !fpreg(op->getResultType()) ? regcount : regcountf;
     auto rorder = !fpreg(op->getResultType()) ? order : orderf;
-
-    for (int i = 0; i < rcnt; i++) {
-      if (!bad.count(rorder[i]) && !unpreferred.count(rorder[i])) {
-        assignment[op] = rorder[i];
-        break;
+    auto tryAssign = [&](bool onlyCallee, bool allowUnpreferred) -> bool {
+      for (int i = 0; i < rcnt; i++) {
+        Reg cand = rorder[i];
+        if (onlyCallee && !calleeSaved.count(cand))
+          continue;
+        if (bad.count(cand))
+          continue;
+        if (!allowUnpreferred && unpreferred.count(cand))
+          continue;
+        assignment[op] = cand;
+        return true;
       }
-    }
+      return false;
+    };
+
+    bool preferCallee = !isLeaf && callSpan[op] > 0;
+    if (!(preferCallee && tryAssign(/*onlyCallee=*/ true, /*allowUnpreferred=*/ false)))
+      tryAssign(/*onlyCallee=*/ false, /*allowUnpreferred=*/ false);
 
     // We have excluded too much. Try it again.
     if (!assignment.count(op) && unpreferred.size()) {
-      for (int i = 0; i < rcnt; i++) {
-        if (!bad.count(rorder[i])) {
-          assignment[op] = rorder[i];
-          break;
-        }
-      }
+      if (!(preferCallee && tryAssign(/*onlyCallee=*/ true, /*allowUnpreferred=*/ true)))
+        tryAssign(/*onlyCallee=*/ false, /*allowUnpreferred=*/ true);
     }
 
     if (assignment.count(op))
@@ -1102,6 +1120,7 @@ void RegAlloc::run() {
 
   for (auto func : funcs) {
     proEpilogue(func, leaves.count(func));
-    tidyup(func->getRegion());
+    if (envEnabled("SISY_RV_ENABLE_TIDYUP", true))
+      tidyup(func->getRegion());
   }
 }

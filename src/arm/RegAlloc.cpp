@@ -556,22 +556,30 @@ skip_prefer_assign:
 
     auto rcnt = !fpreg(op->getResultType()) ? regcount : regcountf;
     auto rorder = !fpreg(op->getResultType()) ? order : orderf;
-
-    for (int i = 0; i < rcnt; i++) {
-      if (!bad.count(rorder[i]) && !unpreferred.count(rorder[i])) {
-        assignment[op] = rorder[i];
-        break;
-      }
-    }
-
-    // We have excluded too much. Try it again.
-    if (!assignment.count(op) && unpreferred.size()) {
+    auto tryAssign = [&](bool onlyCallee, bool allowUnpreferred) -> bool {
       for (int i = 0; i < rcnt; i++) {
-        if (!bad.count(rorder[i])) {
-          assignment[op] = rorder[i];
-          break;
-        }
+        Reg cand = rorder[i];
+        if (onlyCallee && !calleeSaved.count(cand))
+          continue;
+        if (bad.count(cand))
+          continue;
+        if (!allowUnpreferred && unpreferred.count(cand))
+          continue;
+        assignment[op] = cand;
+        return true;
       }
+      return false;
+    };
+
+    // Values spanning call-like ops tend to thrash if placed in caller-saved regs.
+    bool preferCallee = !isLeaf && callSpan[op] > 0;
+    if (!(preferCallee && tryAssign(/*onlyCallee=*/ true, /*allowUnpreferred=*/ false)))
+      tryAssign(/*onlyCallee=*/ false, /*allowUnpreferred=*/ false);
+
+    // We have excluded too much. Try again with weaker constraints.
+    if (!assignment.count(op) && unpreferred.size()) {
+      if (!(preferCallee && tryAssign(/*onlyCallee=*/ true, /*allowUnpreferred=*/ true)))
+        tryAssign(/*onlyCallee=*/ false, /*allowUnpreferred=*/ true);
     }
 
     if (assignment.count(op))
