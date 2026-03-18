@@ -115,9 +115,6 @@ void ColumnMajor::run() {
   if (!convert.size())
     return;
 
-  for (auto b : convert)
-    std::cerr << "convert to column major: " << b;
-
   // Perform conversion.
   // We've ensured every access has a subscript here.
   auto loads = module->findAll<LoadOp>();

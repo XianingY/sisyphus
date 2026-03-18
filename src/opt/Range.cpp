@@ -446,7 +446,10 @@ void Range::analyze(Region *region) {
       inQueue.insert(op);
     }
 
-    while (!queue.empty()) {
+    int budget = int(allOps.size()) * 64;
+    if (budget < 2048)
+      budget = 2048;
+    while (!queue.empty() && budget-- > 0) {
       Op *op = queue.front();
       queue.pop_front();
       inQueue.erase(op);
@@ -466,6 +469,13 @@ void Range::analyze(Region *region) {
             queue.push_back(dep);
         }
       }
+    }
+
+    if (budget <= 0) {
+      // Safety fallback for non-monotonic conditional refinement cycles.
+      // Keep progress by doing one bounded full sweep and continue.
+      for (auto op : allOps)
+        changed |= calculateRange(op);
     }
 
     if (!changed)
