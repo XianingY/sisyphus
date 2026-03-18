@@ -19,6 +19,8 @@ Sisyphus is a SysY compiler project for the 2025 compiler contest track.
   - `--dump-pass-timing`
   - `--enable-experimental` (opt-in for experimental O1/O2 passes; off by default)
   - `--use-legacy-codegen` (escape hatch during dialect migration)
+  - `--force-dialect-codegen` (forbid automatic fallback; fail fast on unsupported dialect lowering)
+  - `--dialect-fallback-report=stderr|<path>` (emit frontend path and fallback reason codes)
   - `--enable-hir-pipeline` / `--disable-hir-pipeline`
   - `--dump-hir` / `--dump-cfg`
   - `--verify-hir` / `--verify-cfg`
@@ -65,6 +67,9 @@ cmake --build build -j
 
 # Legacy fallback path for A/B and rollback
 ./build/compiler tests/smoke/basic.sy -S -o basic.rv.legacy.s -O2 --use-legacy-codegen
+
+# Forced pure dialect path (no fallback)
+./build/compiler tests/smoke/basic.sy -S -o basic.rv.forced.s -O1 --force-dialect-codegen
 ```
 
 ## Smoke Test
@@ -108,6 +113,12 @@ scripts/eval-runtime.sh official-functional riscv O1
 RUNTIME_SOFT_PERF=1 RUNTIME_PERF_TIMEOUT_SEC=20 scripts/eval-runtime.sh official-arm-perf arm O2
 RUNTIME_SOFT_PERF=1 RUNTIME_PERF_TIMEOUT_SEC=20 scripts/eval-runtime.sh official-riscv-perf riscv O1
 
+# Dialect coverage report (default vs forced-dialect on same suite)
+scripts/eval-dialect-coverage.sh official-functional riscv O1
+
+# Pass extra compiler args into eval-runtime/regression/compare
+SISY_COMPILER_EXTRA_ARGS="--force-dialect-codegen" scripts/eval-runtime.sh official-functional riscv O1
+
 # Compare against local biframe compiler
 scripts/eval-vs-biframe.sh official-functional riscv O1
 
@@ -125,6 +136,8 @@ Runtime evaluation environment variables:
 - `BIFRAME_COMPILER` (default: `/home/wslootie/github/cpe/biframe/build/sysc`)
 - `RUNTIME_CASE_LIMIT` / `RUNTIME_CASE_FILTER` (optional smoke/debug subset controls)
 - Runtime CSV includes `suspect_input_underflow` to label likely input-underflow/UB-sensitive cases.
+- Runtime CSV also includes `frontend_path` and `fallback_reason_codes` (for dialect migration coverage tracking).
+- `SISY_COMPILER_EXTRA_ARGS` can be used to forward extra compiler flags in runtime/regression/compare scripts.
 
 Compare/validator environment variables:
 
