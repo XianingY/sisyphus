@@ -29,7 +29,12 @@ Options::Options() {
   disableO2Experimental = false;
   disableLoopRotate = false;
   disableConstUnroll = false;
-  enableHIRPipeline = false;
+  enableHIRPipeline = true;
+  useLegacyCodegen = false;
+  dumpHIR = false;
+  dumpCFG = false;
+  verifyHIR = true;
+  verifyCFG = true;
   sat = false;
   bv = false;
   inlineThreshold = 200;
@@ -185,6 +190,16 @@ Options sys::parseArgs(int argc, char **argv) {
     PARSEOPT("--enable-experimental", enableExperimental);
     PARSEOPT("--disable-o2-experimental", disableO2Experimental);
     PARSEOPT("--enable-hir-pipeline", enableHIRPipeline);
+    if (strcmp(argv[i], "--disable-hir-pipeline") == 0) {
+      opts.enableHIRPipeline = false;
+      opts.useLegacyCodegen = true;
+      continue;
+    }
+    PARSEOPT("--use-legacy-codegen", useLegacyCodegen);
+    PARSEOPT("--dump-hir", dumpHIR);
+    PARSEOPT("--dump-cfg", dumpCFG);
+    PARSEOPT("--verify-hir", verifyHIR);
+    PARSEOPT("--verify-cfg", verifyCFG);
     if (strcmp(argv[i], "--disable-loop-rotate") == 0) {
       opts.disableLoopRotate = true;
       opts.loopRotateExplicit = true;
@@ -227,6 +242,10 @@ Options sys::parseArgs(int argc, char **argv) {
 
   if (opts.emitIR)
     opts.dumpMidIR = true;
+  if (opts.useLegacyCodegen)
+    opts.enableHIRPipeline = false;
+  if (!opts.enableHIRPipeline)
+    opts.useLegacyCodegen = true;
 
   if (!opts.inlineThresholdExplicit) {
     if (opts.o2)
@@ -250,7 +269,8 @@ Options sys::parseArgs(int argc, char **argv) {
       << "usage: compiler <input.sy> -S -o <output.s> [-O0|-O1|-O2] [--target=riscv|arm]\n"
       << "       [--inline-threshold=N] [--late-inline-threshold=N]\n"
       << "       [--disable-o2-experimental]\n"
-      << "       [--enable-hir-pipeline]\n"
+      << "       [--enable-hir-pipeline|--disable-hir-pipeline|--use-legacy-codegen]\n"
+      << "       [--dump-hir] [--dump-cfg] [--verify-hir] [--verify-cfg]\n"
       << "       [--disable-loop-rotate|--enable-loop-rotate] [--disable-const-unroll]\n"
       << "       compiler <input.sy> -S -o <output.s> --emit-ir --verify-ir\n";
     exit(1);

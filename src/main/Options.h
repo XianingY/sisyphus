@@ -26,6 +26,11 @@ struct Options {
     option disableLoopRotate : 1;
     option disableConstUnroll : 1;
     option enableHIRPipeline : 1;
+    option useLegacyCodegen : 1;
+    option dumpHIR : 1;
+    option dumpCFG : 1;
+    option verifyHIR : 1;
+    option verifyCFG : 1;
     option bv : 1;
     option sat : 1;
   };

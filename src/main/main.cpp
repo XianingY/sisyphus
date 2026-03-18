@@ -1,17 +1,22 @@
 #include "Options.h"
 #include "PipelineProfiles.h"
 #include <fstream>
-#include <sstream>
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <iostream>
+#include <sstream>
 #include <vector>
 
 #include "../frontend/FrontendFacade.h"
+#include "../cfg/CFGOps.h"
+#include "../cfg/HIRToCFG.h"
+#include "../cfg/CFGVerifier.h"
+#include "../cfg/CFGLegality.h"
+#include "../cfg/CFGToLegacy.h"
 #include "../hir/HIRBuilder.h"
 #include "../hir/HIRVerifier.h"
 #include "../hir/HIRCanonicalize.h"
-#include "../hir/HIRLowering.h"
 #include "../pass/PassRegistry.h"
 #include "../utils/smt/SMT.h"
 
@@ -182,38 +187,64 @@ int main(int argc, char **argv) {
 
   std::unique_ptr<sys::CodeGen> cg;
   std::unique_ptr<sys::hir::Module> hirModule;
+  std::unique_ptr<sys::cfg::Module> cfgModule;
+
   auto runStage = [&](const char *stageName, auto &&fn) {
     auto start = std::chrono::steady_clock::now();
     fn();
     if (opts.dumpPassTiming) {
       auto end = std::chrono::steady_clock::now();
       double ms = std::chrono::duration<double, std::milli>(end - start).count();
-      std::cerr << "[hir-stage] " << stageName << " : " << ms << " ms\n";
+      std::cerr << "[stage-timing] " << stageName << " : " << ms << " ms\n";
     }
   };
+  auto stageDumpPath = [&](const std::string &stage, const std::string &payload) {
+    auto path = "/tmp/sisyphus-" + stage + ".dump";
+    std::ofstream ofs(path);
+    ofs << payload;
+    return path;
+  };
+  auto failStage = [&](const std::string &stage, const std::vector<std::string> &errors, const std::string &payload) {
+    auto dumpPath = stageDumpPath(stage, payload);
+    std::cerr << "[stage-fail] file=" << opts.inputFile
+              << " stage=" << stage
+              << " dump=" << dumpPath << "\n";
+    for (const auto &e : errors)
+      std::cerr << "  - " << e << "\n";
+    std::exit(1);
+  };
 
-  if (opts.enableHIRPipeline) {
-    runStage("build", [&]() {
+  bool dumpHIR = opts.dumpHIR;
+  if (const char *env = std::getenv("SISY_DUMP_HIR"))
+    dumpHIR = dumpHIR || (env[0] && std::strcmp(env, "0") != 0);
+  bool dumpCFG = opts.dumpCFG;
+  if (const char *env = std::getenv("SISY_DUMP_CFG"))
+    dumpCFG = dumpCFG || (env[0] && std::strcmp(env, "0") != 0);
+
+  if (opts.useLegacyCodegen) {
+    cg = std::make_unique<sys::CodeGen>(node);
+  } else {
+    runStage("hir.build", [&]() {
       sys::hir::Builder builder;
       hirModule = std::make_unique<sys::hir::Module>(builder.build(node));
     });
-    if (const char *env = std::getenv("SISY_DUMP_HIR")) {
-      if (env[0] && std::strcmp(env, "0") != 0) {
-        std::cerr << "===== HIR =====\n";
-        sys::hir::dump(*hirModule, std::cerr);
-      }
+    if (dumpHIR) {
+      std::cerr << "===== HIR =====\n";
+      sys::hir::dump(*hirModule, std::cerr);
     }
-    runStage("verify.pre", [&]() {
-      std::vector<std::string> errors;
-      if (!sys::hir::verify(*hirModule, errors)) {
-        std::cerr << "[hir-stage-fail] file=" << opts.inputFile << " stage=verify.pre\n";
-        std::cerr << "hir verification failed before canonicalize:\n";
-        for (const auto &e : errors)
-          std::cerr << "  - " << e << "\n";
-        std::exit(1);
-      }
-    });
-    runStage("canonicalize", [&]() {
+
+    if (opts.verifyHIR) {
+      runStage("hir.verify.pre", [&]() {
+        std::vector<std::string> errors;
+        if (!sys::hir::verify(*hirModule, errors)) {
+          std::ostringstream os;
+          sys::hir::dump(*hirModule, os);
+          failStage("hir-verify-pre", errors, os.str());
+        }
+      });
+    }
+
+    runStage("hir.canonicalize", [&]() {
       sys::hir::Canonicalizer canonicalizer;
       auto stats = canonicalizer.run(*hirModule);
       if (opts.verbose || opts.stats) {
@@ -221,25 +252,62 @@ int main(int argc, char **argv) {
                   << " dead_branches=" << stats.deadBranchesEliminated << "\n";
       }
     });
-    runStage("verify.post", [&]() {
+
+    if (opts.verifyHIR) {
+      runStage("hir.verify.post", [&]() {
+        std::vector<std::string> errors;
+        if (!sys::hir::verify(*hirModule, errors)) {
+          std::ostringstream os;
+          sys::hir::dump(*hirModule, os);
+          failStage("hir-verify-post", errors, os.str());
+        }
+      });
+    }
+
+    runStage("hir.to-cfg", [&]() {
       std::vector<std::string> errors;
-      if (!sys::hir::verify(*hirModule, errors)) {
-        std::cerr << "[hir-stage-fail] file=" << opts.inputFile << " stage=verify.post\n";
-        std::cerr << "hir verification failed after canonicalize:\n";
-        for (const auto &e : errors)
-          std::cerr << "  - " << e << "\n";
-        std::exit(1);
+      cfgModule = std::make_unique<sys::cfg::Module>(sys::cfg::lowerFromHIR(*hirModule, errors));
+      if (!errors.empty()) {
+        std::ostringstream os;
+        if (cfgModule)
+          sys::cfg::dump(*cfgModule, os);
+        failStage("hir-to-cfg", errors, os.str());
       }
     });
-    runStage("lower", [&]() {
-      cg = sys::hir::lowerToLegacyIR(*hirModule, node);
-      if (!cg) {
-        std::cerr << "hir lowering failed: missing source ast\n";
-        std::exit(1);
+    if (dumpCFG) {
+      std::cerr << "===== CFG =====\n";
+      sys::cfg::dump(*cfgModule, std::cerr);
+    }
+
+    if (opts.verifyCFG) {
+      runStage("cfg.legality", [&]() {
+        std::vector<std::string> errors;
+        if (!sys::cfg::verifyHIRToCFGConversion(*hirModule, *cfgModule, errors)) {
+          std::ostringstream os;
+          sys::cfg::dump(*cfgModule, os);
+          failStage("cfg-legality", errors, os.str());
+        }
+      });
+      runStage("cfg.verify", [&]() {
+        std::vector<std::string> errors;
+        if (!sys::cfg::verify(*cfgModule, errors)) {
+          std::ostringstream os;
+          sys::cfg::dump(*cfgModule, os);
+          failStage("cfg-verify", errors, os.str());
+        }
+      });
+    }
+
+    runStage("cfg.to-legacy", [&]() {
+      std::vector<std::string> errors;
+      cg = sys::cfg::lowerToLegacyIR(*cfgModule, node, errors);
+      if (!cg || !errors.empty()) {
+        std::ostringstream os;
+        if (cfgModule)
+          sys::cfg::dump(*cfgModule, os);
+        failStage("cfg-to-legacy", errors, os.str());
       }
     });
-  } else {
-    cg = std::make_unique<sys::CodeGen>(node);
   }
   delete node;
 

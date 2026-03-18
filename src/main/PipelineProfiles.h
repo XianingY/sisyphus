@@ -14,7 +14,13 @@ enum class CoreProfile {
   O2,
 };
 
+enum class FrontendProfile {
+  Legacy,
+  Dialect,
+};
+
 struct PipelinePlan {
+  FrontendProfile frontendProfile;
   CoreProfile coreProfile;
   bool aggressive;
   bool enableO2Experimental;
@@ -22,7 +28,6 @@ struct PipelinePlan {
   int o2LoopRounds;
   bool useArmBackend;
   bool useRvBackend;
-  bool useHIRFrontend;
 };
 
 PipelinePlan selectPlan(const Options &opts);

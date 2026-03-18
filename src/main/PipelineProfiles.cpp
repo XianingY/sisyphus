@@ -265,10 +265,21 @@ const char *coreProfileName(CoreProfile profile) {
   return "unknown";
 }
 
+const char *frontendProfileName(FrontendProfile profile) {
+  switch (profile) {
+  case FrontendProfile::Legacy:
+    return "legacy";
+  case FrontendProfile::Dialect:
+    return "dialect";
+  }
+  return "unknown";
+}
+
 }  // namespace
 
 PipelinePlan selectPlan(const Options &opts) {
   PipelinePlan plan;
+  plan.frontendProfile = opts.useLegacyCodegen ? FrontendProfile::Legacy : FrontendProfile::Dialect;
   if (opts.o2)
     plan.coreProfile = CoreProfile::O2;
   else if (opts.o1)
@@ -282,7 +293,6 @@ PipelinePlan selectPlan(const Options &opts) {
   plan.o2LoopRounds = getenvPositive("SISY_O2_LOOP_ROUNDS", 3, 1, 8);
   plan.useArmBackend = opts.arm;
   plan.useRvBackend = opts.rv;
-  plan.useHIRFrontend = opts.enableHIRPipeline;
   return plan;
 }
 
@@ -307,12 +317,12 @@ PipelinePlan configurePipeline(PassManager &pm, const Options &opts) {
 
 std::string formatPlan(const PipelinePlan &plan) {
   std::ostringstream oss;
-  oss << "core=" << coreProfileName(plan.coreProfile)
+  oss << "frontend=" << frontendProfileName(plan.frontendProfile)
+      << ", core=" << coreProfileName(plan.coreProfile)
       << ", aggressive=" << (plan.aggressive ? "1" : "0")
       << ", o2_experimental=" << (plan.enableO2Experimental ? "1" : "0")
       << ", o2_heavy=" << (plan.enableO2Heavy ? "1" : "0")
       << ", o2_loop_rounds=" << plan.o2LoopRounds
-      << ", hir_frontend=" << (plan.useHIRFrontend ? "1" : "0")
       << ", backend=[";
   bool first = true;
   if (plan.useArmBackend) {

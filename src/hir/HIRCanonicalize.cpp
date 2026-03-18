@@ -62,11 +62,11 @@ CanonStats Canonicalizer::run(Module &module) {
     while (!stack.empty()) {
       Op *op = stack.back();
       stack.pop_back();
+      changed = foldConstExpr(op, stats) || changed;
+      changed = simplifyStructuredControl(op, stats) || changed;
       for (auto it = op->children.rbegin(); it != op->children.rend(); ++it)
         if (it->get())
           stack.push_back(it->get());
-      changed = foldConstExpr(op, stats) || changed;
-      changed = simplifyStructuredControl(op, stats) || changed;
     }
   }
   return stats;
