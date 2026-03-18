@@ -6,6 +6,7 @@
 #include <chrono>
 #include <iostream>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 #include "../frontend/FrontendFacade.h"
@@ -186,6 +187,7 @@ int main(int argc, char **argv) {
   sys::Sema sema(node, ctx);
 
   std::unique_ptr<sys::CodeGen> cg;
+  std::unique_ptr<sys::ModuleOp> loweredModule;
   std::unique_ptr<sys::hir::Module> hirModule;
   std::unique_ptr<sys::cfg::Module> cfgModule;
 
@@ -220,6 +222,42 @@ int main(int argc, char **argv) {
   bool dumpCFG = opts.dumpCFG;
   if (const char *env = std::getenv("SISY_DUMP_CFG"))
     dumpCFG = dumpCFG || (env[0] && std::strcmp(env, "0") != 0);
+  auto requiresLegacyFallback = [&](const sys::hir::Module &mod, std::vector<std::string> &reasons) {
+    reasons.clear();
+    std::unordered_set<std::string> seen;
+    std::vector<const sys::hir::Op*> stack;
+    if (mod.root)
+      stack.push_back(mod.root.get());
+
+    while (!stack.empty()) {
+      auto *op = stack.back();
+      stack.pop_back();
+      if (!op)
+        continue;
+
+      if (op->kind == sys::hir::OpKind::VarDecl) {
+        if (auto *var = sys::dyn_cast<sys::VarDeclNode>(op->origin)) {
+          if (var->global && seen.insert("global-vardecl").second)
+            reasons.push_back("global variable declaration");
+          if (var->init && (sys::isa<sys::ConstArrayNode>(var->init) || sys::isa<sys::LocalArrayNode>(var->init)) &&
+              seen.insert("array-init").second)
+            reasons.push_back("array initializer");
+        }
+        if (!op->arrayDims.empty() && seen.insert("array-decl").second)
+          reasons.push_back("array declaration");
+      }
+
+      if ((op->kind == sys::hir::OpKind::Load || op->kind == sys::hir::OpKind::Store) &&
+          (op->type == sys::hir::TypeKind::Array || op->type == sys::hir::TypeKind::Pointer) &&
+          seen.insert("ptr-array-memory").second)
+        reasons.push_back("pointer/array memory access");
+
+      for (const auto &child : op->children)
+        if (child)
+          stack.push_back(child.get());
+    }
+    return !reasons.empty();
+  };
 
   if (opts.useLegacyCodegen) {
     cg = std::make_unique<sys::CodeGen>(node);
@@ -264,54 +302,66 @@ int main(int argc, char **argv) {
       });
     }
 
-    runStage("hir.to-cfg", [&]() {
-      std::vector<std::string> errors;
-      cfgModule = std::make_unique<sys::cfg::Module>(sys::cfg::lowerFromHIR(*hirModule, errors));
-      if (!errors.empty()) {
-        std::ostringstream os;
-        if (cfgModule)
-          sys::cfg::dump(*cfgModule, os);
-        failStage("hir-to-cfg", errors, os.str());
+    std::vector<std::string> fallbackReasons;
+    if (requiresLegacyFallback(*hirModule, fallbackReasons)) {
+      if (opts.verbose || opts.stats) {
+        std::cerr << "[dialect-fallback] switch to legacy codegen due to:\n";
+        for (const auto &r : fallbackReasons)
+          std::cerr << "  - " << r << "\n";
       }
-    });
-    if (dumpCFG) {
-      std::cerr << "===== CFG =====\n";
-      sys::cfg::dump(*cfgModule, std::cerr);
+      cg = std::make_unique<sys::CodeGen>(node);
     }
 
-    if (opts.verifyCFG) {
-      runStage("cfg.legality", [&]() {
+    if (!cg) {
+      runStage("hir.to-cfg", [&]() {
         std::vector<std::string> errors;
-        if (!sys::cfg::verifyHIRToCFGConversion(*hirModule, *cfgModule, errors)) {
+        cfgModule = std::make_unique<sys::cfg::Module>(sys::cfg::lowerFromHIR(*hirModule, errors));
+        if (!errors.empty()) {
           std::ostringstream os;
-          sys::cfg::dump(*cfgModule, os);
-          failStage("cfg-legality", errors, os.str());
+          if (cfgModule)
+            sys::cfg::dump(*cfgModule, os);
+          failStage("hir-to-cfg", errors, os.str());
         }
       });
-      runStage("cfg.verify", [&]() {
+      if (dumpCFG) {
+        std::cerr << "===== CFG =====\n";
+        sys::cfg::dump(*cfgModule, std::cerr);
+      }
+
+      if (opts.verifyCFG) {
+        runStage("cfg.legality", [&]() {
+          std::vector<std::string> errors;
+          if (!sys::cfg::verifyHIRToCFGConversion(*hirModule, *cfgModule, errors)) {
+            std::ostringstream os;
+            sys::cfg::dump(*cfgModule, os);
+            failStage("cfg-legality", errors, os.str());
+          }
+        });
+        runStage("cfg.verify", [&]() {
+          std::vector<std::string> errors;
+          if (!sys::cfg::verify(*cfgModule, errors)) {
+            std::ostringstream os;
+            sys::cfg::dump(*cfgModule, os);
+            failStage("cfg-verify", errors, os.str());
+          }
+        });
+      }
+
+      runStage("cfg.to-legacy", [&]() {
         std::vector<std::string> errors;
-        if (!sys::cfg::verify(*cfgModule, errors)) {
+        loweredModule = sys::cfg::lowerToLegacyIR(*cfgModule, errors);
+        if (!loweredModule || !errors.empty()) {
           std::ostringstream os;
-          sys::cfg::dump(*cfgModule, os);
-          failStage("cfg-verify", errors, os.str());
+          if (cfgModule)
+            sys::cfg::dump(*cfgModule, os);
+          failStage("cfg-to-legacy", errors, os.str());
         }
       });
     }
-
-    runStage("cfg.to-legacy", [&]() {
-      std::vector<std::string> errors;
-      cg = sys::cfg::lowerToLegacyIR(*cfgModule, node, errors);
-      if (!cg || !errors.empty()) {
-        std::ostringstream os;
-        if (cfgModule)
-          sys::cfg::dump(*cfgModule, os);
-        failStage("cfg-to-legacy", errors, os.str());
-      }
-    });
   }
   delete node;
 
-  sys::ModuleOp *module = cg->getModule();
+  sys::ModuleOp *module = cg ? cg->getModule() : loweredModule.get();
   if (opts.dumpMidIR) {
     if (opts.emitIR)
       std::cerr << "===== Initial IR =====\n";

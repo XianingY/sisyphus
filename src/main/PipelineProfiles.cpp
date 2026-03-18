@@ -93,6 +93,137 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, const Pipeline
 
   pm.addPass<sys::MoveAlloca>();
 
+  auto appendLoweredTail = [&]() {
+    // ARM keeps a conservative mid-end tail for stability on open-perf
+    // correctness-sensitive families. Run an extra CFG cleanup after select to
+    // ensure phi/pred consistency in edge-case structured lowering patterns.
+    if (opts.arm && !aggressive) {
+      pm.addPass<sys::FlattenCFG>();
+      pm.addPass<sys::GVN>();
+      pm.addPass<sys::DCE>();
+      pm.addPass<sys::Mem2Reg>();
+      pm.addPass<sys::RegularFold>();
+      pm.addPass<sys::DCE>();
+      pm.addPass<sys::SimplifyCFG>();
+      pm.addPass<sys::DCE>();
+      pm.addPass<sys::InstSchedule>();
+      return;
+    }
+
+    pm.addPass<sys::FlattenCFG>();
+    pm.addPass<sys::GVN>();
+    pm.addPass<sys::DCE>();
+    pm.addPass<sys::Inline>(/*inlineThreshold=*/ opts.inlineThreshold);
+    pm.addPass<sys::DCE>();
+    pm.addPass<sys::Localize>(/*beforeFlattenCFG=*/ false);
+    pm.addPass<sys::Globalize>();
+
+    pm.addPass<sys::Mem2Reg>();
+    pm.addPass<sys::Alias>();
+    pm.addPass<sys::RegularFold>();
+    pm.addPass<sys::DCE>();
+    pm.addPass<sys::DAE>();
+    pm.addPass<sys::Alias>();
+    pm.addPass<sys::DSE>();
+    pm.addPass<sys::DLE>();
+    pm.addPass<sys::GVN>();
+    if (aggressive || enableO1LiteTail)
+      pm.addPass<sys::Reassociate>();
+
+    pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
+    if (!opts.disableLoopRotate)
+      pm.addPass<sys::LoopRotate>();
+    pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ false);
+    pm.addPass<sys::LICM>();
+    if (!opts.disableConstUnroll)
+      pm.addPass<sys::ConstLoopUnroll>();
+    pm.addPass<sys::SCEV>();
+    pm.addPass<sys::AggressiveDCE>();
+    if (opts.arm && opts.enableExperimental)
+      pm.addPass<sys::Vectorize>();
+    pm.addPass<sys::GVN>();
+
+    pm.addPass<sys::RegularFold>();
+    pm.addPass<sys::DCE>();
+    pm.addPass<sys::GVN>();
+    pm.addPass<sys::SimplifyCFG>();
+    pm.addPass<sys::Alias>();
+    pm.addPass<sys::DAE>();
+    pm.addPass<sys::DSE>();
+    pm.addPass<sys::DLE>();
+    pm.addPass<sys::Select>();
+    if (aggressive || enableO1LiteTail) {
+      pm.addPass<sys::Range>();
+      pm.addPass<sys::RangeAwareFold>();
+      pm.addPass<sys::Splice>();
+    }
+    if (enableO1LiteTail) {
+      pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
+      pm.addPass<sys::LICM>();
+      pm.addPass<sys::SCEV>();
+      pm.addPass<sys::GVN>();
+      pm.addPass<sys::RegularFold>();
+    }
+    pm.addPass<sys::RegularFold>();
+    pm.addPass<sys::DCE>();
+    pm.addPass<sys::GCM>();
+    pm.addPass<sys::GVN>();
+    pm.addPass<sys::AggressiveDCE>();
+
+    pm.addPass<sys::LateInline>(/*threshold=*/ opts.lateInlineThreshold);
+    pm.addPass<sys::RegularFold>();
+    pm.addPass<sys::GVN>();
+    pm.addPass<sys::Alias>();
+    pm.addPass<sys::DSE>();
+    pm.addPass<sys::DLE>();
+    pm.addPass<sys::DCE>();
+    pm.addPass<sys::InlineStore>();
+    if (enableO2Experimental && plan.enableO2Heavy)
+      pm.addPass<sys::Cached>();
+    if (enableO2Experimental && plan.enableO2Heavy)
+      pm.addPass<sys::SynthConstArray>();
+    pm.addPass<sys::RegularFold>();
+    pm.addPass<sys::DCE>();
+    pm.addPass<sys::GCM>();
+    pm.addPass<sys::GVN>();
+
+    int loopRounds = aggressive ? plan.o2LoopRounds : 3;
+    for (int i = 0; i < loopRounds; i++) {
+      pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
+      pm.addPass<sys::LICM>();
+      pm.addPass<sys::SCEV>();
+      pm.addPass<sys::RemoveEmptyLoop>();
+      pm.addPass<sys::GVN>();
+      pm.addPass<sys::RegularFold>();
+    }
+    if (aggressive) {
+      pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
+      pm.addPass<sys::LICM>();
+      pm.addPass<sys::SCEV>();
+      pm.addPass<sys::GVN>();
+      pm.addPass<sys::RegularFold>();
+    }
+
+    if (aggressive) {
+      pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
+      pm.addPass<sys::LICM>();
+      pm.addPass<sys::SCEV>();
+      pm.addPass<sys::GVN>();
+      pm.addPass<sys::RegularFold>();
+      pm.addPass<sys::DCE>();
+    }
+    pm.addPass<sys::AggressiveDCE>();
+    pm.addPass<sys::SimplifyCFG>();
+    pm.addPass<sys::InstSchedule>();
+  };
+
+  if (plan.frontendProfile == FrontendProfile::Dialect) {
+    // Dialect frontend already lowered structured control to explicit CFG.
+    // Skip structured-only pre-opt stages to avoid semantic drift.
+    appendLoweredTail();
+    return;
+  }
+
   if (armSafeStructured) {
     pm.addPass<sys::AtMostOnce>();
     pm.addPass<sys::Localize>(/*beforeFlattenCFG=*/ true);
@@ -129,128 +260,7 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, const Pipeline
     pm.addPass<sys::LoopDCE>();
   }
   pm.addPass<sys::Lower>();
-
-  // ARM keeps a conservative mid-end tail for stability on open-perf
-  // correctness-sensitive families. Run an extra CFG cleanup after select to
-  // ensure phi/pred consistency in edge-case structured lowering patterns.
-  if (opts.arm && !aggressive) {
-    pm.addPass<sys::FlattenCFG>();
-    pm.addPass<sys::GVN>();
-    pm.addPass<sys::DCE>();
-    pm.addPass<sys::Mem2Reg>();
-    pm.addPass<sys::RegularFold>();
-    pm.addPass<sys::DCE>();
-    pm.addPass<sys::SimplifyCFG>();
-    pm.addPass<sys::DCE>();
-    pm.addPass<sys::InstSchedule>();
-    return;
-  }
-
-  pm.addPass<sys::FlattenCFG>();
-  pm.addPass<sys::GVN>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::Inline>(/*inlineThreshold=*/ opts.inlineThreshold);
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::Localize>(/*beforeFlattenCFG=*/ false);
-  pm.addPass<sys::Globalize>();
-
-  pm.addPass<sys::Mem2Reg>();
-  pm.addPass<sys::Alias>();
-  pm.addPass<sys::RegularFold>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::DAE>();
-  pm.addPass<sys::Alias>();
-  pm.addPass<sys::DSE>();
-  pm.addPass<sys::DLE>();
-  pm.addPass<sys::GVN>();
-  if (aggressive || enableO1LiteTail)
-    pm.addPass<sys::Reassociate>();
-
-  pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
-  if (!opts.disableLoopRotate)
-    pm.addPass<sys::LoopRotate>();
-  pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ false);
-  pm.addPass<sys::LICM>();
-  if (!opts.disableConstUnroll)
-    pm.addPass<sys::ConstLoopUnroll>();
-  pm.addPass<sys::SCEV>();
-  pm.addPass<sys::AggressiveDCE>();
-  if (opts.arm && opts.enableExperimental)
-    pm.addPass<sys::Vectorize>();
-  pm.addPass<sys::GVN>();
-
-  pm.addPass<sys::RegularFold>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::GVN>();
-  pm.addPass<sys::SimplifyCFG>();
-  pm.addPass<sys::Alias>();
-  pm.addPass<sys::DAE>();
-  pm.addPass<sys::DSE>();
-  pm.addPass<sys::DLE>();
-  pm.addPass<sys::Select>();
-  if (aggressive || enableO1LiteTail) {
-    pm.addPass<sys::Range>();
-    pm.addPass<sys::RangeAwareFold>();
-    pm.addPass<sys::Splice>();
-  }
-  if (enableO1LiteTail) {
-    pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
-    pm.addPass<sys::LICM>();
-    pm.addPass<sys::SCEV>();
-    pm.addPass<sys::GVN>();
-    pm.addPass<sys::RegularFold>();
-  }
-  pm.addPass<sys::RegularFold>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::GCM>();
-  pm.addPass<sys::GVN>();
-  pm.addPass<sys::AggressiveDCE>();
-
-  pm.addPass<sys::LateInline>(/*threshold=*/ opts.lateInlineThreshold);
-  pm.addPass<sys::RegularFold>();
-  pm.addPass<sys::GVN>();
-  pm.addPass<sys::Alias>();
-  pm.addPass<sys::DSE>();
-  pm.addPass<sys::DLE>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::InlineStore>();
-  if (enableO2Experimental && plan.enableO2Heavy)
-    pm.addPass<sys::Cached>();
-  if (enableO2Experimental && plan.enableO2Heavy)
-    pm.addPass<sys::SynthConstArray>();
-  pm.addPass<sys::RegularFold>();
-  pm.addPass<sys::DCE>();
-  pm.addPass<sys::GCM>();
-  pm.addPass<sys::GVN>();
-
-  int loopRounds = aggressive ? plan.o2LoopRounds : 3;
-  for (int i = 0; i < loopRounds; i++) {
-    pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
-    pm.addPass<sys::LICM>();
-    pm.addPass<sys::SCEV>();
-    pm.addPass<sys::RemoveEmptyLoop>();
-    pm.addPass<sys::GVN>();
-    pm.addPass<sys::RegularFold>();
-  }
-  if (aggressive) {
-    pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
-    pm.addPass<sys::LICM>();
-    pm.addPass<sys::SCEV>();
-    pm.addPass<sys::GVN>();
-    pm.addPass<sys::RegularFold>();
-  }
-
-  if (aggressive) {
-    pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
-    pm.addPass<sys::LICM>();
-    pm.addPass<sys::SCEV>();
-    pm.addPass<sys::GVN>();
-    pm.addPass<sys::RegularFold>();
-    pm.addPass<sys::DCE>();
-  }
-  pm.addPass<sys::AggressiveDCE>();
-  pm.addPass<sys::SimplifyCFG>();
-  pm.addPass<sys::InstSchedule>();
+  appendLoweredTail();
 }
 
 const char *coreProfileName(CoreProfile profile) {
