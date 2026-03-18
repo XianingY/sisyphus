@@ -81,6 +81,7 @@ hard_fail_total=0
 compile_fail_total=0
 compile_crash_total=0
 link_fail_total=0
+functional_profiles_seen=0
 while IFS=, read -r profile mtime path; do
   opt="${profile##*-}"
   rest="${profile%-*}"
@@ -103,7 +104,7 @@ NR == 1 { next }
 {
   total++;
   is_pass = ($8 == "1");
-  is_perf = (index($2, "perf/") == 1) || ($1 == "open-perf");
+  is_perf = ($1 != "official-functional");
   if (is_pass) pass++; else fail++;
   if ($6 == "timeout") timeout_count++;
   if ($6 == "compile_fail") compile_fail_count++;
@@ -142,6 +143,9 @@ EOF
     fi
   done
   if [[ "${gate_this}" -eq 1 ]]; then
+    if [[ "${suite}" == "official-functional" ]]; then
+      functional_profiles_seen=$((functional_profiles_seen + 1))
+    fi
     hard_fail_total=$((hard_fail_total + ffail))
     compile_fail_total=$((compile_fail_total + compile_fail_count))
     compile_crash_total=$((compile_crash_total + compile_crash_count))
@@ -206,11 +210,15 @@ done <"${latest_tmp}"
 sort -t, -k6,6nr -o "${SUMMARY_DIR}/o2-vs-o1-regressed-top20.csv" "${SUMMARY_DIR}/o2-vs-o1-regressed-top20.csv"
 
 status_file="${SUMMARY_DIR}/gate-status.txt"
+if [[ "${functional_profiles_seen}" -eq 0 ]]; then
+  hard_fail_total=1
+fi
 {
   echo "label=${SUMMARY_LABEL}"
   echo "runtime_root=${RUNTIME_ROOT}"
   echo "gate_opts=${SUMMARY_GATE_OPTS}"
   echo "generated_at=$(date -Iseconds)"
+  echo "functional_profiles_seen=${functional_profiles_seen}"
   echo "hard_fail_total=${hard_fail_total}"
   echo "compile_fail_total=${compile_fail_total}"
   echo "compile_crash_total=${compile_crash_total}"

@@ -9,6 +9,26 @@ fi
 SUITE="$1"
 TARGET="$2"
 OPT="$3"
+case "${SUITE}" in
+  official-functional|official-arm-perf|official-riscv-perf|official-arm-final-perf|official-riscv-final-perf)
+    ;;
+  open-functional)
+    echo "error: suite '${SUITE}' has been removed; use 'official-functional'"
+    exit 1
+    ;;
+  open-perf)
+    echo "error: suite '${SUITE}' has been removed; use one of official-*-perf suites"
+    exit 1
+    ;;
+  compiler-dev|lvx)
+    echo "error: suite '${SUITE}' has been removed from baseline"
+    exit 1
+    ;;
+  *)
+    echo "error: unsupported suite '${SUITE}'"
+    exit 1
+    ;;
+esac
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EVAL_RUNTIME="${ROOT_DIR}/scripts/eval-runtime.sh"

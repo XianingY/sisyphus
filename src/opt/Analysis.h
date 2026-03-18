@@ -63,6 +63,23 @@ public:
   void run() override;
 };
 
+// Lightweight equality-class propagation.
+// Attaches EqClassAttr to integer SSA values for analysis-driven folds.
+class EqClass : public Pass {
+  int classes = 0;
+
+public:
+  EqClass(ModuleOp *module): Pass(module) {}
+
+  std::string name() override { return "eqclass"; }
+  std::map<std::string, int> stats() override {
+    return {
+      { "classes", classes }
+    };
+  }
+  void run() override;
+};
+
 // Mark functions that are called at most once.
 class AtMostOnce : public Pass {
 public:
@@ -72,6 +89,9 @@ public:
   std::map<std::string, int> stats() override { return {}; }
   void run() override;
 };
+
+// Utility for clearing transient EqClassAttr metadata.
+void removeEqClass(Region *region);
 
 }
 

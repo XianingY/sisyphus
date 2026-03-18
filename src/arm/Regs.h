@@ -55,26 +55,26 @@ static const Reg leafOrderf[] = {
   Reg::v0, Reg::v1, Reg::v2, Reg::v3,
   Reg::v4, Reg::v5, Reg::v6, Reg::v7,
 
-  Reg::v8, Reg::v9, Reg::v10, Reg::v11,
-  Reg::v12, Reg::v13, Reg::v14,
-
   Reg::v16, Reg::v17, Reg::v18,
   Reg::v19, Reg::v20, Reg::v21, Reg::v22,
   Reg::v23, Reg::v24, Reg::v25, Reg::v26,
   Reg::v27, Reg::v28, Reg::v29,
+
+  Reg::v8, Reg::v9, Reg::v10, Reg::v11,
+  Reg::v12, Reg::v13, Reg::v14,
 };
 // Order for non-leaf functions.
 static const Reg normalOrderf[] = {
   Reg::v0, Reg::v1, Reg::v2, Reg::v3,
   Reg::v4, Reg::v5, Reg::v6, Reg::v7,
 
-  Reg::v8, Reg::v9, Reg::v10, Reg::v11,
-  Reg::v12, Reg::v13, Reg::v14,
-
   Reg::v16, Reg::v17, Reg::v18,
   Reg::v19, Reg::v20, Reg::v21, Reg::v22,
   Reg::v23, Reg::v24, Reg::v25, Reg::v26,
   Reg::v27, Reg::v28, Reg::v29,
+
+  Reg::v8, Reg::v9, Reg::v10, Reg::v11,
+  Reg::v12, Reg::v13, Reg::v14,
 };
 
 static const std::set<Reg> callerSaved = {
@@ -87,20 +87,20 @@ static const std::set<Reg> callerSaved = {
 
   Reg::v0, Reg::v1, Reg::v2, Reg::v3,
   Reg::v4, Reg::v5, Reg::v6, Reg::v7,
-
-  Reg::v8, Reg::v9, Reg::v10, Reg::v11,
-  Reg::v12, Reg::v13, Reg::v14, Reg::v15,
+  Reg::v16, Reg::v17, Reg::v18,
+  Reg::v19, Reg::v20, Reg::v21, Reg::v22,
+  Reg::v23, Reg::v24, Reg::v25, Reg::v26,
+  Reg::v27, Reg::v28, Reg::v29, Reg::v30,
+  Reg::v31,
 };
 
 static const std::set<Reg> calleeSaved = {
   Reg::x19, Reg::x20, Reg::x21, Reg::x22,
   Reg::x23, Reg::x24, Reg::x25, Reg::x26,
-  Reg::x27, Reg::x28,
+  Reg::x27, Reg::x28, Reg::x29,
 
-  Reg::v16, Reg::v17, Reg::v18,
-  Reg::v19, Reg::v20, Reg::v21, Reg::v22,
-  Reg::v23, Reg::v24, Reg::v25, Reg::v26,
-  Reg::v27, Reg::v28, Reg::v29, Reg::v30,
+  Reg::v8, Reg::v9, Reg::v10, Reg::v11,
+  Reg::v12, Reg::v13, Reg::v14, Reg::v15,
 };
 
 constexpr int leafRegCnt = 26;

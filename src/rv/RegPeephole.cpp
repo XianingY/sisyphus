@@ -167,6 +167,17 @@ int RegAlloc::latePeephole(Op *funcOp) {
     auto next = op->nextOp();
     int offset = V(op);
     if (isa<AddiOp>(next) &&
+        next->has<RdAttr>() && next->has<RsAttr>() && next->has<IntAttr>() &&
+        RS(next) == RS(op) && V(next) == offset &&
+        RD(next) != RD(op) &&
+        RD(op) != Reg::sp && RD(next) != Reg::sp &&
+        canTwoHopFold(op) && canTwoHopFold(cast<AddiOp>(next))) {
+      converted++;
+      builder.replace<MvOp>(next, { RDC(RD(next)), RSC(RD(op)) });
+      return true;
+    }
+
+    if (isa<AddiOp>(next) &&
         canTwoHopFold(op) &&
         op->getUses().size() == 1 &&
         next->getUses().size() == 1 &&

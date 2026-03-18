@@ -339,21 +339,24 @@ void Lower::run() {
     builder.setBeforeOp(op);
     const auto &args = op->getOperands();
 
+    std::vector<std::pair<Value, Reg>> argRegWrites;
+    std::vector<std::pair<Value, Reg>> fargRegWrites;
     std::vector<Value> argsNew;
     std::vector<Value> fargsNew;
     std::vector<Value> spilled;
+    int cnt = 0;
+    int fcnt = 0;
     for (size_t i = 0; i < args.size(); i++) {
       Value arg = args[i];
       auto ty = arg.defining->getResultType();
-      int fcnt = fargsNew.size();
-      int cnt = argsNew.size();
-
       if (ty == Value::f32 && fcnt < 8) {
-        fargsNew.push_back(builder.create<WriteRegOp>({ arg }, { new RegAttr(fregs[fcnt]) }));
+        fargRegWrites.push_back({ arg, fregs[fcnt] });
+        fcnt++;
         continue;
       }
       if (ty != Value::f32 && cnt < 8) {
-        argsNew.push_back(builder.create<WriteRegOp>({ arg }, { new RegAttr(regs[cnt]) }));
+        argRegWrites.push_back({ arg, regs[cnt] });
+        cnt++;
         continue;
       }
       spilled.push_back(arg);
@@ -372,7 +375,18 @@ void Lower::run() {
       builder.create<StoreOp>({ spilled[i], sp }, { new SizeAttr(8), new IntAttr(i * 8) });
     }
 
-    builder.create<sys::rv::CallOp>(argsNew, { 
+    argsNew.reserve(argRegWrites.size());
+    for (auto &[arg, reg] : argRegWrites)
+      argsNew.push_back(builder.create<WriteRegOp>({ arg }, { new RegAttr(reg) }));
+    fargsNew.reserve(fargRegWrites.size());
+    for (auto &[arg, reg] : fargRegWrites)
+      fargsNew.push_back(builder.create<WriteRegOp>({ arg }, { new RegAttr(reg) }));
+
+    std::vector<Value> callArgs;
+    callArgs.reserve(argsNew.size() + fargsNew.size());
+    callArgs.insert(callArgs.end(), argsNew.begin(), argsNew.end());
+    callArgs.insert(callArgs.end(), fargsNew.begin(), fargsNew.end());
+    builder.create<sys::rv::CallOp>(callArgs, {
       op->get<NameAttr>(),
       new ArgCountAttr(args.size())
     });

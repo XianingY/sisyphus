@@ -197,6 +197,17 @@ public:
   RangeAttr *clone() override { return new RangeAttr(range); }
 };
 
+// Value congruence class id produced by EqClass pass.
+class EqClassAttr : public AttrImpl<EqClassAttr, __LINE__> {
+public:
+  int id;
+
+  EqClassAttr(int id): id(id) {}
+
+  std::string toString() override { return "<eqclass = " + std::to_string(id) + ">"; }
+  EqClassAttr *clone() override { return new EqClassAttr(id); }
+};
+
 // Marks whether an alloca is floating point.
 // This can't be deduced by return value because it's always i64.
 class FPAttr : public AttrImpl<FPAttr, __LINE__> {
@@ -273,6 +284,7 @@ bool mayAlias(Op *a, Op *b);
 #define CALLER(op) (op)->get<CallerAttr>()->callers
 #define ALIAS(op) (op)->get<AliasAttr>()
 #define RANGE(op) (op)->get<RangeAttr>()->range
+#define EQCLASS(op) (op)->get<EqClassAttr>()->id
 #define FROM(attr) cast<FromAttr>(attr)->bb
 #define INCR(op) (op)->get<IncreaseAttr>()
 #define DIM(op) (op)->get<DimensionAttr>()->dims

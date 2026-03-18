@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [[ $# -lt 2 || $# -gt 3 ]]; then
   echo "usage: $0 <suite> <target> [perf_timeout_sec]"
-  echo "suite: open-functional | open-perf | compiler-dev | lvx"
+  echo "suite: official-functional | official-arm-perf | official-riscv-perf | official-arm-final-perf | official-riscv-final-perf"
   echo "target: riscv | arm"
   exit 1
 fi
@@ -19,6 +19,26 @@ if [[ "${TARGET}" != "riscv" && "${TARGET}" != "arm" ]]; then
   echo "error: target must be riscv|arm"
   exit 1
 fi
+case "${SUITE}" in
+  official-functional|official-arm-perf|official-riscv-perf|official-arm-final-perf|official-riscv-final-perf)
+    ;;
+  open-functional)
+    echo "error: suite '${SUITE}' has been removed; use 'official-functional'"
+    exit 1
+    ;;
+  open-perf)
+    echo "error: suite '${SUITE}' has been removed; use one of official-*-perf suites"
+    exit 1
+    ;;
+  compiler-dev|lvx)
+    echo "error: suite '${SUITE}' has been removed from baseline"
+    exit 1
+    ;;
+  *)
+    echo "error: unsupported suite '${SUITE}'"
+    exit 1
+    ;;
+esac
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EVAL_RUNTIME="${ROOT_DIR}/scripts/eval-runtime.sh"
@@ -57,10 +77,21 @@ calc_timeout_count() {
   awk -F, 'NR > 1 && $6 == "timeout" { c++ } END { print c + 0 }' "${csv}"
 }
 
+calc_status_count() {
+  local csv="$1"
+  local status="$2"
+  awk -F, -v s="${status}" 'NR > 1 && $6 == s { c++ } END { print c + 0 }' "${csv}"
+}
+
+calc_pass_count() {
+  local csv="$1"
+  awk -F, 'NR > 1 && $8 == "1" { c++ } END { print c + 0 }' "${csv}"
+}
+
 calc_functional_fail() {
   local csv="$1"
   awk -F, '
-    NR > 1 && index($2, "perf/") != 1 {
+    NR > 1 && $1 == "official-functional" {
       total++;
       if ($8 != "1") fail++;
     }
@@ -142,8 +173,12 @@ run_eval O2 "${O2_CSV}"
 
 O1_PASS_RATE="$(calc_pass_rate "${O1_CSV}")"
 O2_PASS_RATE="$(calc_pass_rate "${O2_CSV}")"
+O1_PASS_COUNT="$(calc_pass_count "${O1_CSV}")"
+O2_PASS_COUNT="$(calc_pass_count "${O2_CSV}")"
 O1_TIMEOUTS="$(calc_timeout_count "${O1_CSV}")"
 O2_TIMEOUTS="$(calc_timeout_count "${O2_CSV}")"
+O2_COMPILE_CRASH="$(calc_status_count "${O2_CSV}" "compile_crash")"
+O2_LINK_FAIL="$(calc_status_count "${O2_CSV}" "link_fail")"
 O1_FUNC_FAIL="$(calc_functional_fail "${O1_CSV}")"
 O2_FUNC_FAIL="$(calc_functional_fail "${O2_CSV}")"
 O1_MEDIAN="$(calc_quantile_ms "${O1_CSV}" 0.5)"
@@ -160,7 +195,7 @@ PREV_REGRESSED_COUNT=-1
 enforce_no_expand=0
 if [[ "${AGGR_ENFORCE_NO_EXPAND}" == "1" ]]; then
   enforce_no_expand=1
-elif [[ "${AGGR_ENFORCE_NO_EXPAND}" == "auto" && "${SUITE}" == "compiler-dev" ]]; then
+elif [[ "${AGGR_ENFORCE_NO_EXPAND}" == "auto" && "${SUITE}" != "official-functional" ]]; then
   enforce_no_expand=1
 fi
 if (( enforce_no_expand == 1 )); then
@@ -181,10 +216,16 @@ fi
 
 SOFT_GATE=1
 enforce_perf_soft=0
-if [[ "${SUITE}" == "compiler-dev" || "${SUITE}" == "open-perf" || "${SUITE}" == "lvx" ]]; then
+if [[ "${SUITE}" != "official-functional" ]]; then
   enforce_perf_soft=1
 fi
 if (( enforce_perf_soft == 1 )); then
+  if (( O2_COMPILE_CRASH > 0 || O2_LINK_FAIL > 0 )); then
+    SOFT_GATE=0
+  fi
+  if (( O2_PASS_COUNT < O1_PASS_COUNT )); then
+    SOFT_GATE=0
+  fi
   if (( O2_TIMEOUTS > O1_TIMEOUTS )); then
     SOFT_GATE=0
   fi
@@ -196,11 +237,11 @@ if (( enforce_perf_soft == 1 )); then
   fi
 fi
 
-printf 'suite,target,perf_timeout_sec,o1_pass_rate,o1_median_ms,o1_p90_ms,o1_timeout_count,o2_pass_rate,o2_median_ms,o2_p90_ms,o2_timeout_count,o2_vs_o1_delta_ms,o2_vs_o1_ratio,regressed_count,positive_sum,functional_hard_gate,soft_gate,top20_no_expand\n' >"${REPORT_CSV}"
-printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+printf 'suite,target,perf_timeout_sec,o1_pass_count,o1_pass_rate,o1_median_ms,o1_p90_ms,o1_timeout_count,o2_pass_count,o2_pass_rate,o2_median_ms,o2_p90_ms,o2_timeout_count,o2_compile_crash_count,o2_link_fail_count,o2_vs_o1_delta_ms,o2_vs_o1_ratio,regressed_count,positive_sum,functional_hard_gate,soft_gate,top20_no_expand\n' >"${REPORT_CSV}"
+printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
   "${SUITE}" "${TARGET}" "${PERF_TIMEOUT_SEC}" \
-  "${O1_PASS_RATE}" "${O1_MEDIAN}" "${O1_P90}" "${O1_TIMEOUTS}" \
-  "${O2_PASS_RATE}" "${O2_MEDIAN}" "${O2_P90}" "${O2_TIMEOUTS}" \
+  "${O1_PASS_COUNT}" "${O1_PASS_RATE}" "${O1_MEDIAN}" "${O1_P90}" "${O1_TIMEOUTS}" \
+  "${O2_PASS_COUNT}" "${O2_PASS_RATE}" "${O2_MEDIAN}" "${O2_P90}" "${O2_TIMEOUTS}" "${O2_COMPILE_CRASH}" "${O2_LINK_FAIL}" \
   "${O2_DELTA_MS}" "${O2_DELTA_RATIO}" "${REGRESSED_COUNT}" "${POSITIVE_SUM}" \
   "${FUNCTIONAL_HARD_GATE}" "${SOFT_GATE}" "${TOP20_NO_EXPAND}" >>"${REPORT_CSV}"
 
@@ -220,7 +261,7 @@ printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
 echo "report: ${REPORT_CSV}"
 echo "top20 : ${REGRESSED_TOP20}"
 echo "O1    : pass_rate=${O1_PASS_RATE} median=${O1_MEDIAN}ms p90=${O1_P90}ms timeout=${O1_TIMEOUTS}"
-echo "O2    : pass_rate=${O2_PASS_RATE} median=${O2_MEDIAN}ms p90=${O2_P90}ms timeout=${O2_TIMEOUTS}"
+echo "O2    : pass_rate=${O2_PASS_RATE} median=${O2_MEDIAN}ms p90=${O2_P90}ms timeout=${O2_TIMEOUTS} compile_crash=${O2_COMPILE_CRASH} link_fail=${O2_LINK_FAIL}"
 echo "delta : o2_vs_o1_delta_ms=${O2_DELTA_MS} ratio=${O2_DELTA_RATIO}"
 echo "tol   : median_tol_ratio=${AGGR_MEDIAN_TOL_RATIO} median_tol_ms=${AGGR_MEDIAN_TOL_MS}"
 echo "rule  : enforce_no_expand=${enforce_no_expand}"

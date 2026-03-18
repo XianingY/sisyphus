@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPILER="${ROOT_DIR}/build/compiler"
-CASE_ROOT="${ROOT_DIR}/tests/external/compiler-dev-test-cases/testcases/perf"
+CASE_ROOT="${ROOT_DIR}/tests/external/official/official-arm-perf"
 OUT_DIR="${ROOT_DIR}/tests/.out/arm-o2-fft-regression"
 mkdir -p "${OUT_DIR}"
 
@@ -18,9 +18,9 @@ if [[ ! -d "${CASE_ROOT}" ]]; then
 fi
 
 cases=(
-  "12_fft0.c"
-  "13_fft1.c"
-  "14_fft2.c"
+  "fft0.sy"
+  "fft1.sy"
+  "fft2.sy"
 )
 
 for c in "${cases[@]}"; do
@@ -29,8 +29,8 @@ for c in "${cases[@]}"; do
     echo "missing case: ${src}"
     exit 1
   fi
-  asm="${OUT_DIR}/${c%.c}.arm.o2.s"
-  log="${OUT_DIR}/${c%.c}.log"
+  asm="${OUT_DIR}/${c%.sy}.arm.o2.s"
+  log="${OUT_DIR}/${c%.sy}.log"
   echo "[arm-o2-fft] compile ${c}"
   if ! "${COMPILER}" "${src}" -S -o "${asm}" --target=arm -O2 >"${log}" 2>&1; then
     echo "[arm-o2-fft] failed: ${c} (log: ${log})"

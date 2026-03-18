@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
   echo "usage: $0 <suite> <target> <opt>"
-  echo "suite: open-functional | open-perf | compiler-dev | lvx"
+  echo "suite: official-functional | official-arm-perf | official-riscv-perf | official-arm-final-perf | official-riscv-final-perf"
   echo "target: riscv | arm"
   echo "opt: O0 | O1 | O2"
   exit 1
@@ -13,8 +13,33 @@ SUITE="$1"
 TARGET="$2"
 OPT="$3"
 
-if [[ "${SUITE}" != "open-functional" && "${SUITE}" != "open-perf" && "${SUITE}" != "compiler-dev" && "${SUITE}" != "lvx" ]]; then
-  echo "error: unsupported suite '${SUITE}'"
+is_supported_suite=0
+for s in \
+  official-functional \
+  official-arm-perf \
+  official-riscv-perf \
+  official-arm-final-perf \
+  official-riscv-final-perf; do
+  if [[ "${SUITE}" == "${s}" ]]; then
+    is_supported_suite=1
+    break
+  fi
+done
+if [[ "${is_supported_suite}" -ne 1 ]]; then
+  case "${SUITE}" in
+    open-functional)
+      echo "error: suite '${SUITE}' has been removed; use 'official-functional'"
+      ;;
+    open-perf)
+      echo "error: suite '${SUITE}' has been removed; use one of 'official-arm-perf', 'official-riscv-perf', 'official-arm-final-perf', 'official-riscv-final-perf'"
+      ;;
+    compiler-dev|lvx)
+      echo "error: suite '${SUITE}' has been removed from baseline"
+      ;;
+    *)
+      echo "error: unsupported suite '${SUITE}'"
+      ;;
+  esac
   exit 1
 fi
 if [[ "${TARGET}" != "riscv" && "${TARGET}" != "arm" ]]; then
@@ -30,6 +55,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INDEX_SCRIPT="${ROOT_DIR}/scripts/suite-index.sh"
 DOCKERFILE="${ROOT_DIR}/docker/compiler-dev-dual.Dockerfile"
 COMPILER_PATH="${SISY_COMPILER_PATH:-${ROOT_DIR}/build/compiler}"
+OFFICIAL_RUNTIME_ROOT="${OFFICIAL_RUNTIME_ROOT:-/home/wslootie/github/cpe/compiler2025}"
+RUNTIME_SYLIB_C="${RUNTIME_SYLIB_C:-${OFFICIAL_RUNTIME_ROOT}/sylib.c}"
 COMPILER_FLAVOR="${SISY_COMPILER_FLAVOR:-sisy}"
 LABEL="${RUNTIME_LABEL:-sisyphus}"
 RUNTIME_TIMEOUT_SEC="${RUNTIME_TIMEOUT_SEC:-10}"
@@ -78,6 +105,8 @@ if [[ "${SISY_RUNTIME_IN_DOCKER:-0}" != "1" && "${SISY_RUNTIME_LOCAL:-0}" != "1"
       -e SISY_RUNTIME_LOCAL=1 \
       -e SISY_COMPILER_PATH="${COMPILER_PATH}" \
       -e SISY_COMPILER_FLAVOR="${COMPILER_FLAVOR}" \
+      -e OFFICIAL_RUNTIME_ROOT="${OFFICIAL_RUNTIME_ROOT}" \
+      -e RUNTIME_SYLIB_C="${RUNTIME_SYLIB_C}" \
       -e RUNTIME_LABEL="${LABEL}" \
       -e RUNTIME_TIMEOUT_SEC="${RUNTIME_TIMEOUT_SEC}" \
       -e RUNTIME_PERF_TIMEOUT_SEC="${RUNTIME_PERF_TIMEOUT_SEC}" \
@@ -97,6 +126,13 @@ if [[ ! -x "${COMPILER_PATH}" ]]; then
   echo "error: compiler not found at ${COMPILER_PATH}"
   exit 1
 fi
+if [[ ! -f "${RUNTIME_SYLIB_C}" ]]; then
+  RUNTIME_SYLIB_C="${ROOT_DIR}/runtime/sylib.c"
+fi
+if [[ ! -f "${RUNTIME_SYLIB_C}" ]]; then
+  echo "error: runtime source not found: ${RUNTIME_SYLIB_C}"
+  exit 1
+fi
 if [[ ! -x "${INDEX_SCRIPT}" ]]; then
   echo "error: missing ${INDEX_SCRIPT}"
   exit 1
@@ -107,18 +143,10 @@ mkdir -p "$(dirname "${INDEX_LOCK}")"
 if command -v flock >/dev/null 2>&1; then
   (
     flock -x 9
-    if [[ "${SUITE}" == "lvx" ]]; then
-      "${INDEX_SCRIPT}" --include-soft
-    else
-      "${INDEX_SCRIPT}"
-    fi
+    "${INDEX_SCRIPT}"
   ) 9>"${INDEX_LOCK}"
 else
-  if [[ "${SUITE}" == "lvx" ]]; then
-    "${INDEX_SCRIPT}" --include-soft
-  else
-    "${INDEX_SCRIPT}"
-  fi
+  "${INDEX_SCRIPT}"
 fi
 
 INDEX_CSV="${ROOT_DIR}/tests/.out/suites/index.csv"
@@ -290,7 +318,7 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
   actual_file="${tmp_dir}/actual.out"
   timeout_sec="${RUNTIME_TIMEOUT_SEC}"
   is_perf_case=0
-  if [[ "${suite}" == "open-perf" || "${kind}" == "perf" || "${case_id}" == perf/* ]]; then
+  if [[ "${kind}" == "perf" || "${suite}" != "official-functional" ]]; then
     is_perf_case=1
     timeout_sec="${RUNTIME_PERF_TIMEOUT_SEC}"
   fi
@@ -327,7 +355,7 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
   if [[ "${status}" == "ok" ]]; then
     echo "[link] ${asm_path}" >>"${log_path}"
     set +e
-    "${GCC_BIN}" -static "${asm_path}" "${ROOT_DIR}/runtime/sylib.c" -lm -o "${exe_path}" >>"${log_path}" 2>&1
+    "${GCC_BIN}" -static "${asm_path}" "${RUNTIME_SYLIB_C}" -lm -o "${exe_path}" >>"${log_path}" 2>&1
     link_rc=$?
     set -e
     if [[ "${link_rc}" -ne 0 ]]; then

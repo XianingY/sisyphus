@@ -79,8 +79,6 @@ scripts/compare.sh test/custom riscv O1
 scripts/compare.sh test/custom arm O1
 scripts/compare.sh test/custom riscv O2
 scripts/compare.sh test/custom arm O2
-# include perf/* cases explicitly when needed
-COMPARE_INCLUDE_PERF=1 scripts/compare.sh tests/external/compiler-dev-test-cases/testcases riscv O1
 
 # Fast O0/O1 assembly-size proxy
 scripts/asm-delta.sh test/custom riscv
@@ -91,19 +89,17 @@ scripts/eval-o1-matrix.sh test/custom
 # Unified O1/O2 matrix evaluation (RISC-V proxy + ARM consistency checks)
 scripts/eval-profile-matrix.sh test/custom
 
-# Sync public suites and generate suite index
-scripts/suite-sync.sh --update
+# Sync official ZIP suites and generate suite index
+scripts/suite-sync.sh --update --src-root /home/wslootie/github/cpe/compiler2025
 scripts/suite-index.sh
 
-# Generate compiler-dev reference outputs (clang baseline)
-scripts/gen-reference-out.sh compiler-dev
-
 # Runtime eval (Docker-first, QEMU user-mode)
-scripts/eval-runtime.sh open-functional riscv O1
-scripts/eval-runtime.sh compiler-dev arm O1
+scripts/eval-runtime.sh official-functional riscv O1
+RUNTIME_SOFT_PERF=1 RUNTIME_PERF_TIMEOUT_SEC=20 scripts/eval-runtime.sh official-arm-perf arm O2
+RUNTIME_SOFT_PERF=1 RUNTIME_PERF_TIMEOUT_SEC=20 scripts/eval-runtime.sh official-riscv-perf riscv O1
 
 # Compare against local biframe compiler
-scripts/eval-vs-biframe.sh open-functional riscv O1
+scripts/eval-vs-biframe.sh official-functional riscv O1
 
 # Official dataset adapter (safe-skip if dirs are absent)
 scripts/eval-official-adapter.sh /path/to/official/functional /path/to/official/perf /path/to/runtime
@@ -133,10 +129,13 @@ Compare/validator environment variables:
 
 ## Public Suites
 
-- `open-functional`: hard gate (official functional tests from `open-test-cases/sysy`)
-- `open-perf`: hard gate (official public/private perf sets from `open-test-cases/sysy`)
-- `compiler-dev`: hard gate (reference outputs generated into `tests/external/.refs/compiler-dev`)
-- `lvx`: soft gate (runs and reports, not blocking by default)
+- `official-functional`: hard gate (`functional.zip`, SysY standard functional set)
+- `official-arm-perf`: soft perf gate (`ARM-性能.zip`)
+- `official-riscv-perf`: soft perf gate (`RISCV-性能.zip`)
+- `official-arm-final-perf`: soft perf gate (`ARM决赛性能用例.zip`)
+- `official-riscv-final-perf`: soft perf gate (`RISCV决赛性能用例.zip`)
+
+Legacy public-suite repos (`open-test-cases`, `compiler-dev-test-cases`, `lvx`) are no longer part of this project's default baseline.
 
 ## Design Docs
 

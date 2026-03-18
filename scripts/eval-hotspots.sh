@@ -6,6 +6,7 @@ EVAL_RUNTIME="${ROOT_DIR}/scripts/eval-runtime.sh"
 TARGET="${1:-arm}"
 OPT="${2:-O2}"
 PERF_TIMEOUT_SEC="${3:-20}"
+HOTSPOT_INCLUDE_FINAL="${HOTSPOT_INCLUDE_FINAL:-0}"
 OUT_DIR="${ROOT_DIR}/.runtime-reports/hotspots"
 mkdir -p "${OUT_DIR}"
 
@@ -21,6 +22,9 @@ fi
 TS="$(date +%Y%m%d-%H%M%S)"
 SUMMARY="${OUT_DIR}/summary-${TARGET}-${OPT}-${TS}.txt"
 : >"${SUMMARY}"
+PERF_SUITE="official-${TARGET}-perf"
+FINAL_SUITE="official-${TARGET}-final-perf"
+FUNC_SUITE="official-functional"
 
 run_case_group() {
   local suite="$1"
@@ -58,12 +62,19 @@ EOF
   } | tee -a "${SUMMARY}"
 }
 
-run_case_group open-perf "median" "median"
-run_case_group open-perf "brainfuck" "brainfuck"
-run_case_group compiler-dev "perf/12_fft" "fft0"
-run_case_group compiler-dev "perf/13_fft" "fft1"
-run_case_group compiler-dev "perf/14_fft" "fft2"
-run_case_group compiler-dev "perf/18_brainfuck" "brainfuck-bootstrap"
-run_case_group compiler-dev "perf/19_brainfuck" "brainfuck-calculator"
+# Functional correctness hotspot families.
+run_case_group "${FUNC_SUITE}" "95_float" "float-math-95_float"
+run_case_group "${FUNC_SUITE}" "35_math" "float-math-35_math"
+run_case_group "${FUNC_SUITE}" "37_dct" "float-math-37_dct"
+run_case_group "${FUNC_SUITE}" "39_fp_params" "float-math-39_fp_params"
+
+# Performance hotspot families.
+run_case_group "${PERF_SUITE}" "03_sort2" "sort-brainfuck-sort2"
+run_case_group "${PERF_SUITE}" "brainfuck" "sort-brainfuck-brainfuck"
+run_case_group "${PERF_SUITE}" "fft" "fft-crypto-fft"
+run_case_group "${PERF_SUITE}" "crypto" "fft-crypto-crypto"
+if [[ "${HOTSPOT_INCLUDE_FINAL}" == "1" ]]; then
+  run_case_group "${FINAL_SUITE}" "" "final-full"
+fi
 
 echo "summary: ${SUMMARY}"

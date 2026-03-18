@@ -156,18 +156,21 @@ void Lower::run() {
 
   runRewriter([&](StoreOp *op) {
     auto ty = op->DEF(0)->getResultType();
+    int size = op->has<SizeAttr>()
+      ? SIZE(op)
+      : (ty == Value::i128 ? 16 : (ty == Value::i64 ? 8 : 4));
 
     if (ty == Value::f32) {
       builder.replace<StrFOp>(op, op->getOperands(), { new IntAttr(0) });
       return false;
     }
 
-    if (SIZE(op) == 8) {
+    if (size == 8) {
       builder.replace<StrXOp>(op, op->getOperands(), { new IntAttr(0) });
       return false;
     }
 
-    if (ty == Value::i128 && SIZE(op) == 16) {
+    if (ty == Value::i128 && size == 16) {
       builder.replace<St1Op>(op, op->getOperands());
       return false;
     }
@@ -178,18 +181,21 @@ void Lower::run() {
 
   runRewriter([&](LoadOp *op) {
     auto ty = op->getResultType();
+    int size = op->has<SizeAttr>()
+      ? SIZE(op)
+      : (ty == Value::i128 ? 16 : (ty == Value::i64 ? 8 : 4));
     
     if (ty == Value::f32) {
       builder.replace<LdrFOp>(op, op->getOperands(), { new IntAttr(0) });
       return false;
     }
 
-    if (SIZE(op) == 8) {
+    if (size == 8) {
       builder.replace<LdrXOp>(op, op->getOperands(), { new IntAttr(0) });
       return false;
     }
 
-    if (ty == Value::i128 && SIZE(op) == 16) {
+    if (ty == Value::i128 && size == 16) {
       builder.replace<Ld1Op>(op, op->getOperands());
       return false;
     }
@@ -212,21 +218,24 @@ void Lower::run() {
     builder.setBeforeOp(op);
     const auto &args = op->getOperands();
 
+    std::vector<std::pair<Value, Reg>> argRegWrites;
+    std::vector<std::pair<Value, Reg>> fargRegWrites;
     std::vector<Value> argsNew;
     std::vector<Value> fargsNew;
     std::vector<Value> spilled;
+    int cnt = 0;
+    int fcnt = 0;
     for (size_t i = 0; i < args.size(); i++) {
       Value arg = args[i];
       auto ty = arg.defining->getResultType();
-      int fcnt = fargsNew.size();
-      int cnt = argsNew.size();
-
       if (ty == Value::f32 && fcnt < 8) {
-        fargsNew.push_back(builder.create<WriteRegOp>({ arg }, { new RegAttr(fargRegs[fcnt]) }));
+        fargRegWrites.push_back({ arg, fargRegs[fcnt] });
+        fcnt++;
         continue;
       }
       if (ty != Value::f32 && cnt < 8) {
-        argsNew.push_back(builder.create<WriteRegOp>({ arg }, { new RegAttr(argRegs[cnt]) }));
+        argRegWrites.push_back({ arg, argRegs[cnt] });
+        cnt++;
         continue;
       }
       spilled.push_back(arg);
@@ -248,7 +257,18 @@ void Lower::run() {
         builder.create<StrXOp>({ spilled[i], sp }, { new SizeAttr(8), new IntAttr(i * 8) });
     }
 
-    builder.create<BlOp>(argsNew, { 
+    argsNew.reserve(argRegWrites.size());
+    for (auto &[arg, reg] : argRegWrites)
+      argsNew.push_back(builder.create<WriteRegOp>({ arg }, { new RegAttr(reg) }));
+    fargsNew.reserve(fargRegWrites.size());
+    for (auto &[arg, reg] : fargRegWrites)
+      fargsNew.push_back(builder.create<WriteRegOp>({ arg }, { new RegAttr(reg) }));
+
+    std::vector<Value> callArgs;
+    callArgs.reserve(argsNew.size() + fargsNew.size());
+    callArgs.insert(callArgs.end(), argsNew.begin(), argsNew.end());
+    callArgs.insert(callArgs.end(), fargsNew.begin(), fargsNew.end());
+    builder.create<BlOp>(callArgs, {
       op->get<NameAttr>(),
       new ArgCountAttr(args.size())
     });

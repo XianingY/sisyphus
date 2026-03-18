@@ -35,21 +35,20 @@ scripts/eval-o1-matrix.sh /path/to/cases
 For public suite sync/index and runtime evaluation:
 
 ```bash
-scripts/suite-sync.sh --update
+scripts/suite-sync.sh --update --src-root /home/wslootie/github/cpe/compiler2025
 scripts/suite-index.sh
-scripts/gen-reference-out.sh compiler-dev
-scripts/eval-runtime.sh open-functional riscv O1
-# allow perf/* timeout as soft-fail (functional remains hard gate)
-RUNTIME_SOFT_PERF=1 scripts/eval-runtime.sh compiler-dev arm O2
-# set a larger timeout budget for perf/* only (functional keeps base timeout)
-RUNTIME_SOFT_PERF=1 RUNTIME_PERF_TIMEOUT_SEC=20 scripts/eval-runtime.sh compiler-dev arm O2
+# hard functional gate
+scripts/eval-runtime.sh official-functional riscv O1
+# soft perf gate with 20s timeout window
+RUNTIME_SOFT_PERF=1 RUNTIME_PERF_TIMEOUT_SEC=20 scripts/eval-runtime.sh official-arm-perf arm O2
+RUNTIME_SOFT_PERF=1 RUNTIME_PERF_TIMEOUT_SEC=20 scripts/eval-runtime.sh official-riscv-perf riscv O1
 scripts/eval-hotspots.sh arm O2 20
-scripts/eval-vs-biframe.sh open-functional riscv O1
+scripts/eval-vs-biframe.sh official-functional riscv O1
 scripts/runtime-summary.sh
 scripts/runtime-gate.sh
 # aggressive O2 tuning gate (O1 vs O2, defaults to perf timeout 20s)
-scripts/eval-o2-aggressive.sh compiler-dev riscv
-scripts/eval-o2-aggressive.sh compiler-dev arm 20
+scripts/eval-o2-aggressive.sh official-riscv-perf riscv
+scripts/eval-o2-aggressive.sh official-arm-perf arm 20
 # emergency stop for O2-only experimental passes
 scripts/regression.sh /path/to/cases riscv O2 --disable-o2-experimental
 ```

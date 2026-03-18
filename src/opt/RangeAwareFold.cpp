@@ -1,4 +1,5 @@
 #include "CleanupPasses.h"
+#include "Analysis.h"
 #include "../utils/Matcher.h"
 
 using namespace sys;
@@ -13,7 +14,12 @@ std::map<std::string, int> RangeAwareFold::stats() {
 void removeRange(Region *region);
 
 void RangeAwareFold::run() {
+  EqClass(module).run();
+
   Builder builder;
+  auto sameEqClass = [](Op *a, Op *b) -> bool {
+    return a && b && a->has<EqClassAttr>() && b->has<EqClassAttr>() && EQCLASS(a) == EQCLASS(b);
+  };
 
   // Fold left/right shifts early.
   runRewriter([&](DivIOp *op) {
@@ -78,11 +84,83 @@ void RangeAwareFold::run() {
     }
     return false;
   });
+
+  runRewriter([&](EqOp *op) {
+    auto l = op->DEF(0);
+    auto r = op->DEF(1);
+    if (!sameEqClass(l, r))
+      return false;
+    folded++;
+    builder.replace<IntOp>(op, { new IntAttr(1) });
+    return true;
+  });
+
+  runRewriter([&](NeOp *op) {
+    auto l = op->DEF(0);
+    auto r = op->DEF(1);
+    if (!sameEqClass(l, r))
+      return false;
+    folded++;
+    builder.replace<IntOp>(op, { new IntAttr(0) });
+    return true;
+  });
+
+  runRewriter([&](LtOp *op) {
+    auto l = op->DEF(0);
+    auto r = op->DEF(1);
+    if (!sameEqClass(l, r))
+      return false;
+    folded++;
+    builder.replace<IntOp>(op, { new IntAttr(0) });
+    return true;
+  });
+
+  runRewriter([&](LeOp *op) {
+    auto l = op->DEF(0);
+    auto r = op->DEF(1);
+    if (!sameEqClass(l, r))
+      return false;
+    folded++;
+    builder.replace<IntOp>(op, { new IntAttr(1) });
+    return true;
+  });
+
+  runRewriter([&](SubIOp *op) {
+    auto l = op->DEF(0);
+    auto r = op->DEF(1);
+    if (!sameEqClass(l, r))
+      return false;
+    folded++;
+    builder.replace<IntOp>(op, { new IntAttr(0) });
+    return true;
+  });
+
+  // Fold branches whose condition range is already fully determined.
+  runRewriter([&](BranchOp *op) {
+    if (!op->has<ElseAttr>() || op->getOperandCount() != 1)
+      return false;
+    auto cond = op->DEF();
+    if (!cond->has<RangeAttr>())
+      return false;
+    auto [low, high] = RANGE(cond);
+    if (low == 1 && high == 1) {
+      folded++;
+      builder.replace<GotoOp>(op, { new TargetAttr(TARGET(op)) });
+      return true;
+    }
+    if (low == 0 && high == 0) {
+      folded++;
+      builder.replace<GotoOp>(op, { new TargetAttr(ELSE(op)) });
+      return true;
+    }
+    return false;
+  });
   
   auto funcs = collectFuncs();
 
   for (auto func : funcs) {
     auto region = func->getRegion();
     removeRange(region);
+    removeEqClass(region);
   }
 }

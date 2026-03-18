@@ -255,6 +255,17 @@ int RegAlloc::latePeephole(Op *funcOp) {
     auto next = op->nextOp();
     int offset = V(op);
     if (isa<AddXIOp>(next) &&
+        next->has<RdAttr>() && next->has<RsAttr>() && next->has<IntAttr>() &&
+        RS(next) == RS(op) && V(next) == offset &&
+        RD(next) != RD(op) &&
+        RD(op) != Reg::sp && RD(next) != Reg::sp &&
+        canTwoHopFold(op) && canTwoHopFold(cast<AddXIOp>(next))) {
+      converted++;
+      builder.replace<MovROp>(next, { RDC(RD(next)), RSC(RD(op)) });
+      return true;
+    }
+
+    if (isa<AddXIOp>(next) &&
         canTwoHopFold(op) &&
         op->getUses().size() == 1 &&
         next->getUses().size() == 1 &&
@@ -845,100 +856,22 @@ void RegAlloc::tidyup(Region *region) {
   });
 }
 
-void save(Builder builder, const std::vector<Reg> &regs, int offset) {
-  if (offset >= 512) {
-    for (auto reg : regs) {
-      offset -= 8;
-      bool fp = isFP(reg);
-      if (fp)
-        builder.create<StrDOp>({ RSC(reg), RS2C(Reg::sp), new IntAttr(offset) });
-      else
-        builder.create<StrXOp>({ RSC(reg), RS2C(Reg::sp), new IntAttr(offset) });
-    }
-    return;
-  }
-
-  for (int i = 0; i < regs.size() / 2 * 2; i += 2) {
-    Reg r1 = regs[i];
-    Reg r2 = regs[i + 1]; 
-    offset -= 16;
-    bool fp = isFP(r1), fp2 = isFP(r2);
-    if (fp && fp2)
-      builder.create<StpDOp>({ RSC(r1), RS2C(r2), RS3C(Reg::sp), new IntAttr(offset) });
-    if (!fp && !fp2)
-      builder.create<StpXOp>({ RSC(r1), RS2C(r2), RS3C(Reg::sp), new IntAttr(offset) });
-    if (fp && !fp2) {
-      builder.create<StrDOp>({ RSC(r1), RS2C(Reg::sp), new IntAttr(offset + 8) });
-      builder.create<StrXOp>({ RSC(r2), RS2C(Reg::sp), new IntAttr(offset) });
-    }
-    if (!fp && fp2) {
-      builder.create<StrXOp>({ RSC(r1), RS2C(Reg::sp), new IntAttr(offset + 8) });
-      builder.create<StrDOp>({ RSC(r2), RS2C(Reg::sp), new IntAttr(offset) });
-    }
-  }
-  if (regs.size() & 1) {
-    Reg reg = regs.back();
-    offset -= 8;
-    bool fp = isFP(reg);
-    if (fp)
-      builder.create<StrDOp>({ RSC(reg), RS2C(Reg::sp), new IntAttr(offset) });
-    else
-      builder.create<StrXOp>({ RSC(reg), RS2C(Reg::sp), new IntAttr(offset) });
-  }
-}
-
-void load(Builder builder, const std::vector<Reg> &regs, int offset) {
-  if (offset >= 512) {
-    for (auto reg : regs) {
-      offset -= 8;
-      bool fp = isFP(reg);
-      if (fp)
-        builder.create<LdrDOp>({ RDC(reg), RSC(Reg::sp), new IntAttr(offset) });
-      else
-        builder.create<LdrXOp>({ RDC(reg), RSC(Reg::sp), new IntAttr(offset) });
-    }
-    return;
-  }
-
-  // We don't have two rds, so we'd just use rs and rs2.
-  // It won't be used anywhere else anyway.
-  for (int i = 0; i < regs.size() / 2 * 2; i += 2) {
-    Reg r1 = regs[i];
-    Reg r2 = regs[i + 1]; 
-    offset -= 16;
-    bool fp = isFP(r1), fp2 = isFP(r2);
-    if (fp && fp2)
-      builder.create<LdpDOp>({ RSC(r1), RS2C(r2), RS3C(Reg::sp), new IntAttr(offset) });
-    if (!fp && !fp2)
-      builder.create<LdpXOp>({ RSC(r1), RS2C(r2), RS3C(Reg::sp), new IntAttr(offset) });
-    if (fp && !fp2) {
-      builder.create<LdrDOp>({ RDC(r1), RSC(Reg::sp), new IntAttr(offset + 8) });
-      builder.create<LdrXOp>({ RDC(r2), RSC(Reg::sp), new IntAttr(offset) });
-    }
-    if (!fp && fp2) {
-      builder.create<LdrXOp>({ RDC(r1), RSC(Reg::sp), new IntAttr(offset + 8) });
-      builder.create<LdrDOp>({ RDC(r2), RSC(Reg::sp), new IntAttr(offset) });
-    }
-  }
-  if (regs.size() & 1) {
-    Reg reg = regs.back();
-    offset -= 8;
-    bool fp = isFP(reg);
-    if (fp)
-      builder.create<LdrDOp>({ RDC(reg), RSC(Reg::sp), new IntAttr(offset) });
-    else
-      builder.create<LdrXOp>({ RDC(reg), RSC(Reg::sp), new IntAttr(offset) });
-  }
-}
-
 namespace {
 
 bool fitsAddImm12(int imm) {
   return imm >= -4095 && imm <= 4095;
 }
 
-bool fitsMemImm14(int imm) {
-  return imm >= 0 && imm < 16384;
+bool fitsMemImm8(int imm) {
+  return imm >= 0 && imm <= 32760 && imm % 8 == 0;
+}
+
+bool fitsMemImm4(int imm) {
+  return imm >= 0 && imm <= 16380 && imm % 4 == 0;
+}
+
+bool fitsPairImm8(int imm) {
+  return imm >= -512 && imm <= 504 && imm % 8 == 0;
 }
 
 void emitSpAdjust(Builder &builder, int delta) {
@@ -959,11 +892,43 @@ void materializeSpAddr(Builder &builder, Reg tmp, int offset) {
     return;
   }
   builder.create<MovIOp>({ RDC(tmp), new IntAttr(offset) });
-  builder.create<AddXOp>({ RDC(tmp), RSC(tmp), RS2C(Reg::sp) });
+  builder.create<AddXOp>({ RDC(tmp), RSC(Reg::sp), RS2C(tmp) });
+}
+
+void emitStackStore64(Builder &builder, Reg rs, bool fp, int offset) {
+  if (fitsMemImm8(offset)) {
+    if (fp)
+      builder.create<StrDOp>({ RSC(rs), RS2C(Reg::sp), new IntAttr(offset) });
+    else
+      builder.create<StrXOp>({ RSC(rs), RS2C(Reg::sp), new IntAttr(offset) });
+    return;
+  }
+
+  materializeSpAddr(builder, spillReg2, offset);
+  if (fp)
+    builder.create<StrDOp>({ RSC(rs), RS2C(spillReg2), new IntAttr(0) });
+  else
+    builder.create<StrXOp>({ RSC(rs), RS2C(spillReg2), new IntAttr(0) });
+}
+
+void emitStackLoad64(Builder &builder, Reg rd, bool fp, int offset) {
+  if (fitsMemImm8(offset)) {
+    if (fp)
+      builder.create<LdrDOp>({ RDC(rd), RSC(Reg::sp), new IntAttr(offset) });
+    else
+      builder.create<LdrXOp>({ RDC(rd), RSC(Reg::sp), new IntAttr(offset) });
+    return;
+  }
+
+  materializeSpAddr(builder, spillReg2, offset);
+  if (fp)
+    builder.create<LdrDOp>({ RDC(rd), RSC(spillReg2), new IntAttr(0) });
+  else
+    builder.create<LdrXOp>({ RDC(rd), RSC(spillReg2), new IntAttr(0) });
 }
 
 void emitStackGetArgLoad(Builder &builder, Reg rd, bool fp, int offset) {
-  if (fitsMemImm14(offset)) {
+  if ((fp && fitsMemImm4(offset)) || (!fp && fitsMemImm8(offset))) {
     if (fp)
       builder.create<LdrFOp>({ RDC(rd), RSC(Reg::sp), new IntAttr(offset) });
     else
@@ -978,6 +943,52 @@ void emitStackGetArgLoad(Builder &builder, Reg rd, bool fp, int offset) {
     builder.create<LdrXOp>({ RDC(rd), RSC(spillReg2), new IntAttr(0) });
 }
 
+}
+
+void save(Builder builder, const std::vector<Reg> &regs, int offset) {
+  for (int i = 0; i < int(regs.size()) / 2 * 2; i += 2) {
+    Reg r1 = regs[i];
+    Reg r2 = regs[i + 1];
+    offset -= 16;
+    bool fp1 = isFP(r1), fp2 = isFP(r2);
+    if (fp1 == fp2 && fitsPairImm8(offset)) {
+      if (fp1)
+        builder.create<StpDOp>({ RSC(r1), RS2C(r2), RS3C(Reg::sp), new IntAttr(offset) });
+      else
+        builder.create<StpXOp>({ RSC(r1), RS2C(r2), RS3C(Reg::sp), new IntAttr(offset) });
+      continue;
+    }
+    emitStackStore64(builder, r2, fp2, offset);
+    emitStackStore64(builder, r1, fp1, offset + 8);
+  }
+  if (regs.size() & 1) {
+    Reg reg = regs.back();
+    offset -= 8;
+    emitStackStore64(builder, reg, isFP(reg), offset);
+  }
+}
+
+void load(Builder builder, const std::vector<Reg> &regs, int offset) {
+  for (int i = 0; i < int(regs.size()) / 2 * 2; i += 2) {
+    Reg r1 = regs[i];
+    Reg r2 = regs[i + 1];
+    offset -= 16;
+    bool fp1 = isFP(r1), fp2 = isFP(r2);
+    if (fp1 == fp2 && fitsPairImm8(offset)) {
+      if (fp1)
+        builder.create<LdpDOp>({ RSC(r1), RS2C(r2), RS3C(Reg::sp), new IntAttr(offset) });
+      else
+        builder.create<LdpXOp>({ RSC(r1), RS2C(r2), RS3C(Reg::sp), new IntAttr(offset) });
+      continue;
+    }
+    emitStackLoad64(builder, r2, fp2, offset);
+    emitStackLoad64(builder, r1, fp1, offset + 8);
+  }
+  if (regs.size() & 1) {
+    Reg reg = regs.back();
+    offset -= 8;
+    emitStackLoad64(builder, reg, isFP(reg), offset);
+  }
 }
 
 void RegAlloc::proEpilogue(FuncOp *funcOp, bool isLeaf) {

@@ -18,6 +18,8 @@ struct PipelinePlan {
   CoreProfile coreProfile;
   bool aggressive;
   bool enableO2Experimental;
+  bool enableO2Heavy;
+  int o2LoopRounds;
   bool useArmBackend;
   bool useRvBackend;
 };

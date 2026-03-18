@@ -74,7 +74,7 @@ void materializeSpAddr(Builder &builder, Reg tmp, int offset) {
     return;
   }
   builder.create<MovIOp>({ RDC(tmp), new IntAttr(offset) });
-  builder.create<AddXOp>({ RDC(tmp), RSC(tmp), RS2C(Reg::sp) });
+  builder.create<AddXOp>({ RDC(tmp), RSC(Reg::sp), RS2C(tmp) });
 }
 
 void emitStackStore(Builder &builder, Reg src, bool fp, int offset, Reg addrTmp) {
@@ -398,13 +398,13 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       if (def >= last)
         continue;
       int span = last - def;
-      spillWeight[op] += 2LL * localWeight * span;
+      spillWeight[op] += 3LL * localWeight * span;
 
       int l = std::max(0, def + 1);
       int r = std::min<int>(ops.size(), last);
       int callCount = callPrefix[r] - callPrefix[l];
       callSpan[op] = std::max(callSpan[op], callCount);
-      spillWeight[op] += 96LL * localWeight * callCount;
+      spillWeight[op] += 128LL * localWeight * callCount;
     }
 
     // We use event-driven approach to optimize it into O(n log n + E).
@@ -481,6 +481,15 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
   std::unordered_map<Op*, int> spillOffset;
   int currentOffset = STACKOFF(funcOp);
   int highest = 0;
+  auto isAllocatable = [&](Reg reg, bool fp) {
+    auto rcnt = fp ? regcountf : regcount;
+    auto rorder = fp ? orderf : order;
+    for (int i = 0; i < rcnt; i++) {
+      if (rorder[i] == reg)
+        return true;
+    }
+    return false;
+  };
 
   for (auto op : ops) {
     // Do not allocate colored instructions.
@@ -511,21 +520,24 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       // Try to allocate the same register as `ref`.
       if (assignment.count(ref) && !bad.count(assignment[ref])) {
         Reg preferredReg = assignment[ref];
+        if (!isAllocatable(preferredReg, fpreg(op->getResultType())))
+          goto skip_prefer_assign;
         bool crossCallRisk =
-          (callSpan[op] > 0 || callSpan[ref] > 0) && callerSaved.count(preferredReg);
+          (callSpan[op] > 1 || callSpan[ref] > 1) && callerSaved.count(preferredReg);
         if (!crossCallRisk) {
           assignment[op] = preferredReg;
           continue;
         }
       }
     }
+skip_prefer_assign:
 
     // See if there's any preferred registers.
     int preferred = -1;
     for (auto use : op->getUses()) {
       if (isa<WriteRegOp>(use)) {
         auto reg = REG(use);
-        if (!bad.count(reg)) {
+        if (!bad.count(reg) && isAllocatable(reg, fpreg(op->getResultType()))) {
           preferred = (int) reg;
           break;
         }
@@ -533,7 +545,7 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
     }
     if (isa<ReadRegOp>(op)) {
       auto reg = REG(op);
-      if (!bad.count(reg))
+      if (!bad.count(reg) && isAllocatable(reg, fpreg(op->getResultType())))
         preferred = (int) reg;
     }
 
@@ -593,21 +605,10 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       highest = desired;
   }
 
-  // Only a single register is spilled. Let's use x28.
-  if (highest == currentOffset) {
-    for (auto [op, _] : spillOffset)
-      assignment[op] = fpreg(op->getResultType()) ? fspillReg : spillReg;
-    spillOffset.clear();
-  }
-
-  // Only 2 registers are spilled. Let's use x28 and x29.
-  if (highest == currentOffset + 8) {
-    for (auto [op, offset] : spillOffset) {
-      auto fp = fpreg(op->getResultType());
-      assignment[op] = offset ? (fp ? fspillReg3 : spillReg3) : (fp ? fspillReg : spillReg);
-    }
-    spillOffset.clear();
-  }
+  // Keep spilled values in stack slots consistently.
+  // The previous "1/2-spill shortcut" bound spilled values to dedicated regs
+  // (x28/x29, v31/v30), which can alias with temporary address regs in later
+  // lowering and break liveness assumptions in some loops.
   
   // If possible, map some offsets to floating-point registers.
   if (spillOffset.size()) {
@@ -1168,6 +1169,8 @@ void RegAlloc::run() {
           set.insert(op->get<RsAttr>()->reg);
         if (op->has<Rs2Attr>())
           set.insert(op->get<Rs2Attr>()->reg);
+        if (op->has<Rs3Attr>())
+          set.insert(op->get<Rs3Attr>()->reg);
       }
     }
   }

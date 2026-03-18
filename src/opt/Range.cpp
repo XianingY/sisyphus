@@ -1,5 +1,9 @@
 #include "Analysis.h"
 
+#include <deque>
+#include <unordered_map>
+#include <unordered_set>
+
 using namespace sys;
 
 namespace {
@@ -393,16 +397,80 @@ void Range::split(Region *region) {
 }
 
 void Range::analyze(Region *region) {
-  bool changed;
-  nowiden = 4;
-  do {
-    changed = false;
-    nowiden--;
-    for (auto bb : region->getBlocks()) {
-      for (auto op : bb->getOps())
-        changed |= calculateRange(op);
+  std::vector<Op*> allOps;
+  std::unordered_map<Op*, std::vector<Op*>> condDeps;
+  allOps.reserve(1024);
+
+  auto addCondDep = [&](Op *src, Op *phi) {
+    if (!src || !phi)
+      return;
+    auto &deps = condDeps[src];
+    if (std::find(deps.begin(), deps.end(), phi) == deps.end())
+      deps.push_back(phi);
+  };
+
+  for (auto bb : region->getBlocks()) {
+    for (auto op : bb->getOps()) {
+      allOps.push_back(op);
+
+      // Track implicit dependencies used by updateConditional():
+      // phi <- (pred branch cond), where phi only has one incoming edge.
+      if (!isa<PhiOp>(op) || op->getOperandCount() != 1 || op->getAttrs().empty())
+        continue;
+      auto pred = FROM(op->getAttrs()[0]);
+      if (!pred || pred->getOpCount() == 0)
+        continue;
+      auto term = pred->getLastOp();
+      if (!isa<BranchOp>(term) || term->getOperandCount() != 1)
+        continue;
+      auto cond = term->DEF();
+      if (!isa<LtOp>(cond) || cond->getOperandCount() != 2)
+        continue;
+      if (cond->DEF(0) != op->DEF(0))
+        continue;
+      addCondDep(cond, op);
+      addCondDep(cond->DEF(0), op);
+      addCondDep(cond->DEF(1), op);
     }
-  } while (changed);
+  }
+
+  nowiden = 4;
+  for (int round = 0; round < 8; round++) {
+    bool changed = false;
+    nowiden--;
+
+    std::deque<Op*> queue;
+    std::unordered_set<Op*> inQueue;
+    for (auto op : allOps) {
+      queue.push_back(op);
+      inQueue.insert(op);
+    }
+
+    while (!queue.empty()) {
+      Op *op = queue.front();
+      queue.pop_front();
+      inQueue.erase(op);
+
+      if (!calculateRange(op))
+        continue;
+      changed = true;
+
+      for (auto use : op->getUses()) {
+        if (inQueue.insert(use).second)
+          queue.push_back(use);
+      }
+      auto it = condDeps.find(op);
+      if (it != condDeps.end()) {
+        for (auto dep : it->second) {
+          if (inQueue.insert(dep).second)
+            queue.push_back(dep);
+        }
+      }
+    }
+
+    if (!changed)
+      break;
+  }
 }
 
 void Range::run() {

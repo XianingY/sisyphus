@@ -1,5 +1,7 @@
 #include "PipelineProfiles.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <sstream>
 
 #include "../opt/Passes.h"
@@ -17,6 +19,26 @@
 namespace sys::pipeline {
 
 namespace {
+
+int getenvPositive(const char *name, int fallback, int minv, int maxv) {
+  const char *raw = std::getenv(name);
+  if (!raw || !raw[0])
+    return fallback;
+  char *end = nullptr;
+  long v = std::strtol(raw, &end, 10);
+  if (!end || *end || v < minv || v > maxv)
+    return fallback;
+  return (int) v;
+}
+
+bool getenvEnabled(const char *name, bool fallback) {
+  const char *raw = std::getenv(name);
+  if (!raw || !raw[0])
+    return fallback;
+  if (std::strcmp(raw, "0") == 0 || std::strcmp(raw, "false") == 0)
+    return false;
+  return true;
+}
 
 void appendArmBackend(sys::PassManager &pm, const sys::Options &opts) {
   pm.addPass<sys::arm::Lower>();
@@ -61,10 +83,11 @@ void appendCoreO0(sys::PassManager &pm) {
   pm.addPass<sys::InstSchedule>();
 }
 
-void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, bool aggressive) {
-  const bool enableO2Experimental = aggressive && !opts.disableO2Experimental;
+void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, const PipelinePlan &plan) {
+  const bool aggressive = plan.aggressive;
+  const bool enableO2Experimental = plan.enableO2Experimental;
   const bool enableO1LiteTail = !aggressive;
-  const bool armSafeStructured = opts.arm;
+  const bool armSafeStructured = opts.arm && !aggressive;
 
   pm.addPass<sys::MoveAlloca>();
 
@@ -108,7 +131,7 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, bool aggressiv
   // ARM keeps a conservative mid-end tail for stability on open-perf
   // correctness-sensitive families. Run an extra CFG cleanup after select to
   // ensure phi/pred consistency in edge-case structured lowering patterns.
-  if (opts.arm) {
+  if (opts.arm && !aggressive) {
     pm.addPass<sys::FlattenCFG>();
     pm.addPass<sys::GVN>();
     pm.addPass<sys::DCE>();
@@ -189,16 +212,17 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, bool aggressiv
   pm.addPass<sys::DLE>();
   pm.addPass<sys::DCE>();
   pm.addPass<sys::InlineStore>();
-  if (enableO2Experimental)
+  if (enableO2Experimental && plan.enableO2Heavy)
     pm.addPass<sys::Cached>();
-  if (enableO2Experimental)
+  if (enableO2Experimental && plan.enableO2Heavy)
     pm.addPass<sys::SynthConstArray>();
   pm.addPass<sys::RegularFold>();
   pm.addPass<sys::DCE>();
   pm.addPass<sys::GCM>();
   pm.addPass<sys::GVN>();
 
-  for (int i = 0; i < 3; i++) {
+  int loopRounds = aggressive ? plan.o2LoopRounds : 3;
+  for (int i = 0; i < loopRounds; i++) {
     pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
     pm.addPass<sys::LICM>();
     pm.addPass<sys::SCEV>();
@@ -249,11 +273,11 @@ PipelinePlan selectPlan(const Options &opts) {
     plan.coreProfile = CoreProfile::O1;
   else
     plan.coreProfile = CoreProfile::O0;
-  // Keep ARM O1 conservative, but let RISC-V O1 reuse the aggressive core
-  // pipeline shape to avoid known median* regressions while preserving O2-only
-  // experimental toggles.
-  plan.aggressive = opts.o2 || (opts.o1 && opts.rv);
+  // O1 is the stable competition mainline; O2 is the only aggressive lane.
+  plan.aggressive = opts.o2;
   plan.enableO2Experimental = opts.o2 && !opts.disableO2Experimental;
+  plan.enableO2Heavy = plan.enableO2Experimental && getenvEnabled("SISY_O2_ENABLE_HEAVY", true);
+  plan.o2LoopRounds = getenvPositive("SISY_O2_LOOP_ROUNDS", 3, 1, 8);
   plan.useArmBackend = opts.arm;
   plan.useRvBackend = opts.rv;
   return plan;
@@ -267,7 +291,7 @@ PipelinePlan configurePipeline(PassManager &pm, const Options &opts) {
     break;
   case CoreProfile::O1:
   case CoreProfile::O2:
-    appendCoreO1(pm, opts, plan.aggressive);
+    appendCoreO1(pm, opts, plan);
     break;
   }
 
@@ -283,6 +307,8 @@ std::string formatPlan(const PipelinePlan &plan) {
   oss << "core=" << coreProfileName(plan.coreProfile)
       << ", aggressive=" << (plan.aggressive ? "1" : "0")
       << ", o2_experimental=" << (plan.enableO2Experimental ? "1" : "0")
+      << ", o2_heavy=" << (plan.enableO2Heavy ? "1" : "0")
+      << ", o2_loop_rounds=" << plan.o2LoopRounds
       << ", backend=[";
   bool first = true;
   if (plan.useArmBackend) {

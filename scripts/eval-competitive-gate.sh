@@ -70,30 +70,26 @@ summarize_csv() {
   median="$(calc_quantile_ms "${csv}" 0.5)"
   p90="$(calc_quantile_ms "${csv}" 0.9)"
 
-  # shellcheck disable=SC2016
-  read -r total pass fail timeout mismatch compile_fail compile_crash link_fail pass_rate func_fail <<<"$(awk -F, '
+  read -r total pass fail timeout mismatch compile_fail compile_crash link_fail pass_rate <<<"$(awk -F, '
 BEGIN {
   total=0; pass=0; fail=0;
   timeout=0; mismatch=0; compile_fail=0; compile_crash=0; link_fail=0;
-  func_fail=0;
 }
 NR == 1 { next }
 {
   total++;
   is_pass = ($8 == "1");
-  is_perf = (index($2, "perf/") == 1) || ($1 == "open-perf");
   if (is_pass) pass++; else fail++;
   if ($6 == "timeout") timeout++;
   if ($6 == "mismatch" || $7 == "fail") mismatch++;
   if ($6 == "compile_fail") compile_fail++;
   if ($6 == "compile_crash") compile_crash++;
   if ($6 == "link_fail") link_fail++;
-  if (!is_perf && !is_pass) func_fail++;
 }
 END {
   pass_rate = (total == 0 ? 0 : pass / total);
-  printf "%d %d %d %d %d %d %d %d %.6f %d\n",
-    total, pass, fail, timeout, mismatch, compile_fail, compile_crash, link_fail, pass_rate, func_fail;
+  printf "%d %d %d %d %d %d %d %d %.6f\n",
+    total, pass, fail, timeout, mismatch, compile_fail, compile_crash, link_fail, pass_rate;
 }
 ' "${csv}")"
 
@@ -103,7 +99,6 @@ END {
     "${timeout}" "${mismatch}" \
     "${compile_fail}" "${compile_crash}" "${link_fail}" "${pass_rate}" \
     "${median}" "${p90}" "${csv}"
-  printf '%s,%s,%s,%s\n' "${suite}" "${target}" "${opt}" "${func_fail}" >>"${OUT_DIR}/functional-fails.csv"
 }
 
 emit_regression_top20() {
@@ -134,72 +129,94 @@ emit_regression_top20() {
 mkdir -p "${OUT_DIR}"
 printf 'suite,target,opt,total,pass,fail,timeout_count,mismatch_count,compile_fail_count,compile_crash_count,link_fail_count,pass_rate,median_ms,p90_ms,csv\n' \
   >"${OUT_DIR}/metrics.csv"
-printf 'suite,target,opt,functional_fail\n' >"${OUT_DIR}/functional-fails.csv"
 
-# Hard gate chain.
+# Hard gate chain: official functional only.
 for target in riscv arm; do
   for opt in O1 O2; do
-    run_eval open-functional "${target}" "${opt}" 0 10
-    run_eval compiler-dev "${target}" "${opt}" 1 "${PERF_TIMEOUT_SEC}"
+    run_eval official-functional "${target}" "${opt}" 0 10
   done
 done
 
-# Soft perf chain.
+# Soft perf chain: four official perf suites.
 for target in riscv arm; do
   for opt in O1 O2; do
-    run_eval open-perf "${target}" "${opt}" 1 "${PERF_TIMEOUT_SEC}"
+    run_eval "official-${target}-perf" "${target}" "${opt}" 1 "${PERF_TIMEOUT_SEC}"
+    run_eval "official-${target}-final-perf" "${target}" "${opt}" 1 "${PERF_TIMEOUT_SEC}"
   done
 done
 
-for suite in open-functional compiler-dev open-perf; do
+for suite in \
+  official-functional \
+  official-riscv-perf \
+  official-riscv-final-perf \
+  official-arm-perf \
+  official-arm-final-perf; do
   for target in riscv arm; do
     for opt in O1 O2; do
       key="${suite}-${target}-${opt}"
-      summarize_csv "${suite}" "${target}" "${opt}" "${CSV_PATHS[$key]}" >>"${OUT_DIR}/metrics.csv"
+      csv="${CSV_PATHS[${key}]:-}"
+      if [[ -z "${csv}" || ! -f "${csv}" ]]; then
+        continue
+      fi
+      summarize_csv "${suite}" "${target}" "${opt}" "${csv}" >>"${OUT_DIR}/metrics.csv"
     done
   done
 done
 
 emit_regression_top20 \
   riscv \
-  "${CSV_PATHS[open-perf-riscv-O1]}" \
-  "${CSV_PATHS[open-perf-riscv-O2]}" \
+  "${CSV_PATHS[official-riscv-perf-riscv-O1]}" \
+  "${CSV_PATHS[official-riscv-perf-riscv-O2]}" \
   "${OUT_DIR}/top-regressions-riscv.csv"
 emit_regression_top20 \
   arm \
-  "${CSV_PATHS[open-perf-arm-O1]}" \
-  "${CSV_PATHS[open-perf-arm-O2]}" \
+  "${CSV_PATHS[official-arm-perf-arm-O1]}" \
+  "${CSV_PATHS[official-arm-perf-arm-O2]}" \
   "${OUT_DIR}/top-regressions-arm.csv"
 
 {
   echo "group,detail,count"
+  for target in riscv arm; do
+    for opt in O1 O2; do
+      csv="${CSV_PATHS[official-functional-${target}-${opt}]}"
+      count="$(awk -F, 'NR > 1 && ($2 ~ /95_float/ || $2 ~ /35_math/ || $2 ~ /37_dct/ || $2 ~ /39_fp_params/) && ($6 == "mismatch" || $7 == "fail") { c++ } END { print c + 0 }' "${csv}")"
+      echo "float-math-functional,${target}-${opt},${count}"
+    done
+  done
   for opt in O1 O2; do
-    csv="${CSV_PATHS[open-perf-arm-${opt}]}"
+    csv="${CSV_PATHS[official-arm-perf-arm-${opt}]}"
     count="$(awk -F, 'NR > 1 && ($2 ~ /crypto/ || $2 ~ /conv/) && ($6 == "mismatch" || $7 == "fail") { c++ } END { print c + 0 }' "${csv}")"
     echo "arm-mismatch(crypto/conv),${opt},${count}"
   done
   for opt in O1 O2; do
-    csv="${CSV_PATHS[open-perf-arm-${opt}]}"
+    csv="${CSV_PATHS[official-arm-perf-arm-${opt}]}"
     count="$(awk -F, 'NR > 1 && ($2 ~ /03_sort2/ || $2 ~ /brainfuck/) && $6 == "timeout" { c++ } END { print c + 0 }' "${csv}")"
-    echo "arm-timeout(03_sort2/brainfuck),${opt},${count}"
+    echo "sort-brainfuck-timeout-arm,${opt},${count}"
   done
-  csv="${CSV_PATHS[open-perf-riscv-O1]}"
+  for target in riscv arm; do
+    for opt in O1 O2; do
+      csv="${CSV_PATHS[official-${target}-perf-${target}-${opt}]}"
+      count="$(awk -F, 'NR > 1 && ($2 ~ /fft/ || $2 ~ /crypto/) && $6 == "timeout" { c++ } END { print c + 0 }' "${csv}")"
+      echo "fft-crypto-timeout,${target}-${opt},${count}"
+    done
+  done
+  csv="${CSV_PATHS[official-riscv-perf-riscv-O1]}"
   count="$(awk -F, 'NR > 1 && $2 ~ /^median/ && ($6 == "mismatch" || $7 == "fail") { c++ } END { print c + 0 }' "${csv}")"
   echo "riscv-o1-median,O1,${count}"
 } >"${OUT_DIR}/failure-groups.csv"
 
-functional_fail_total="$(awk -F, 'NR > 1 { s += $4 } END { print s + 0 }' "${OUT_DIR}/functional-fails.csv")"
-compile_fail_total="$(awk -F, 'NR > 1 { s += $9 } END { print s + 0 }' "${OUT_DIR}/metrics.csv")"
-compile_crash_total="$(awk -F, 'NR > 1 { s += $10 } END { print s + 0 }' "${OUT_DIR}/metrics.csv")"
-link_fail_total="$(awk -F, 'NR > 1 { s += $11 } END { print s + 0 }' "${OUT_DIR}/metrics.csv")"
+functional_fail_total="$(awk -F, '$1 == "official-functional" && NR > 1 { s += $6 } END { print s + 0 }' "${OUT_DIR}/metrics.csv")"
+functional_compile_fail_total="$(awk -F, '$1 == "official-functional" && NR > 1 { s += $9 } END { print s + 0 }' "${OUT_DIR}/metrics.csv")"
+functional_compile_crash_total="$(awk -F, '$1 == "official-functional" && NR > 1 { s += $10 } END { print s + 0 }' "${OUT_DIR}/metrics.csv")"
+functional_link_fail_total="$(awk -F, '$1 == "official-functional" && NR > 1 { s += $11 } END { print s + 0 }' "${OUT_DIR}/metrics.csv")"
 
-riscv_o1_pass="$(awk -F, '$1 == "open-perf" && $2 == "riscv" && $3 == "O1" { print $5; exit }' "${OUT_DIR}/metrics.csv")"
-arm_o2_pass="$(awk -F, '$1 == "open-perf" && $2 == "arm" && $3 == "O2" { print $5; exit }' "${OUT_DIR}/metrics.csv")"
+riscv_o1_pass="$(awk -F, '$1 == "official-riscv-perf" && $2 == "riscv" && $3 == "O1" { print $5; exit }' "${OUT_DIR}/metrics.csv")"
+arm_o2_pass="$(awk -F, '$1 == "official-arm-perf" && $2 == "arm" && $3 == "O2" { print $5; exit }' "${OUT_DIR}/metrics.csv")"
 riscv_o1_pass="${riscv_o1_pass:-0}"
 arm_o2_pass="${arm_o2_pass:-0}"
 
 hard_gate=1
-if (( functional_fail_total != 0 || compile_crash_total != 0 || compile_fail_total != 0 || link_fail_total != 0 )); then
+if (( functional_fail_total != 0 || functional_compile_fail_total != 0 || functional_compile_crash_total != 0 || functional_link_fail_total != 0 )); then
   hard_gate=0
 fi
 
@@ -213,11 +230,11 @@ fi
   echo "out_dir=${OUT_DIR}"
   echo "perf_timeout_sec=${PERF_TIMEOUT_SEC}"
   echo "functional_fail_total=${functional_fail_total}"
-  echo "compile_fail_total=${compile_fail_total}"
-  echo "compile_crash_total=${compile_crash_total}"
-  echo "link_fail_total=${link_fail_total}"
-  echo "open_perf_riscv_o1_pass=${riscv_o1_pass}"
-  echo "open_perf_arm_o2_pass=${arm_o2_pass}"
+  echo "functional_compile_fail_total=${functional_compile_fail_total}"
+  echo "functional_compile_crash_total=${functional_compile_crash_total}"
+  echo "functional_link_fail_total=${functional_link_fail_total}"
+  echo "official_riscv_perf_o1_pass=${riscv_o1_pass}"
+  echo "official_arm_perf_o2_pass=${arm_o2_pass}"
   if (( hard_gate == 1 )); then
     echo "functional_hard_gate=PASS"
   else
