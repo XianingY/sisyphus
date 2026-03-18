@@ -59,6 +59,29 @@ EOF
   {
     echo "${suite}/${name}: total=${total} pass=${pass} timeout=${timeout} compile_fail=${compile_fail} compile_crash=${compile_crash} link_fail=${link_fail}"
     awk -F, 'NR > 1 { printf "  %s status=%s pass=%s median=%s\n", $2, $6, $8, $9 }' "${csv}"
+    awk -F, '
+NR > 1 {
+  fp[$23]++;
+  reasons = $24;
+  if (NF > 24) {
+    for (i = 25; i <= NF; i++)
+      reasons = reasons "," $i;
+  }
+  if (reasons == "" || reasons == "none")
+    next;
+  n = split(reasons, arr, ",");
+  for (i = 1; i <= n; i++) {
+    if (arr[i] != "")
+      fr[arr[i]]++;
+  }
+}
+END {
+  for (k in fp)
+    printf "  frontend_path[%s]=%d\n", k, fp[k];
+  for (k in fr)
+    printf "  fallback_reason[%s]=%d\n", k, fr[k];
+}
+' "${csv}" | sort
   } | tee -a "${SUMMARY}"
 }
 

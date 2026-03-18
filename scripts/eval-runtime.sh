@@ -62,6 +62,7 @@ LABEL="${RUNTIME_LABEL:-sisyphus}"
 RUNTIME_TIMEOUT_SEC="${RUNTIME_TIMEOUT_SEC:-10}"
 RUNTIME_PERF_TIMEOUT_SEC="${RUNTIME_PERF_TIMEOUT_SEC:-${RUNTIME_TIMEOUT_SEC}}"
 SISY_DOCKER_IMAGE="${SISY_DOCKER_IMAGE:-sisyphus/compiler-dev-dual:latest}"
+SISY_COMPILER_EXTRA_ARGS="${SISY_COMPILER_EXTRA_ARGS:-}"
 DEFAULT_RUNTIME_ROOT="${ROOT_DIR}/tests/.out/runtime"
 RUNTIME_ROOT="${RUNTIME_ROOT:-${DEFAULT_RUNTIME_ROOT}}"
 CSV_EXPLICIT=0
@@ -84,6 +85,12 @@ trap cleanup EXIT
 if [[ "${COMPILER_FLAVOR}" != "sisy" && "${COMPILER_FLAVOR}" != "biframe" ]]; then
   echo "error: SISY_COMPILER_FLAVOR must be sisy|biframe"
   exit 1
+fi
+
+declare -a COMPILER_EXTRA_ARGS_ARR=()
+if [[ -n "${SISY_COMPILER_EXTRA_ARGS}" ]]; then
+  # shellcheck disable=SC2206
+  COMPILER_EXTRA_ARGS_ARR=(${SISY_COMPILER_EXTRA_ARGS})
 fi
 
 if [[ "${SISY_RUNTIME_IN_DOCKER:-0}" != "1" && "${SISY_RUNTIME_LOCAL:-0}" != "1" ]]; then
@@ -114,6 +121,7 @@ if [[ "${SISY_RUNTIME_IN_DOCKER:-0}" != "1" && "${SISY_RUNTIME_LOCAL:-0}" != "1"
       -e RUNTIME_CSV="${CSV_OUT}" \
       -e RUNTIME_CASE_LIMIT="${RUNTIME_CASE_LIMIT}" \
       -e RUNTIME_CASE_FILTER="${RUNTIME_CASE_FILTER}" \
+      -e SISY_COMPILER_EXTRA_ARGS="${SISY_COMPILER_EXTRA_ARGS}" \
       -v "${ROOT_DIR}:${ROOT_DIR}" \
       -w "${ROOT_DIR}" \
       "${SISY_DOCKER_IMAGE}" \
@@ -256,9 +264,18 @@ run_once() {
 compile_case() {
   local src="$1"
   local asm="$2"
+  local dialect_report="$3"
 
   if [[ "${COMPILER_FLAVOR}" == "sisy" ]]; then
-    "${COMPILER_PATH}" "${src}" -S -o "${asm}" "--target=${TARGET}" "-${OPT}"
+    local -a cmd
+    cmd=("${COMPILER_PATH}" "${src}" -S -o "${asm}" "--target=${TARGET}" "-${OPT}")
+    if [[ -n "${dialect_report}" ]]; then
+      cmd+=("--dialect-fallback-report=${dialect_report}")
+    fi
+    if [[ "${#COMPILER_EXTRA_ARGS_ARR[@]}" -gt 0 ]]; then
+      cmd+=("${COMPILER_EXTRA_ARGS_ARR[@]}")
+    fi
+    "${cmd[@]}"
     return 0
   fi
 
@@ -283,7 +300,7 @@ compile_case() {
   fi
 }
 
-printf 'suite,case_id,target,opt,label,status,compare,pass,median_ms,warmup_ms,run1_ms,run2_ms,run3_ms,asm,exe,log,compile_status,asm_emit_status,link_status,input_token_count,estimated_read_count,suspect_input_underflow\n' >"${CSV_OUT}"
+printf 'suite,case_id,target,opt,label,status,compare,pass,median_ms,warmup_ms,run1_ms,run2_ms,run3_ms,asm,exe,log,compile_status,asm_emit_status,link_status,input_token_count,estimated_read_count,suspect_input_underflow,frontend_path,fallback_reason_codes\n' >"${CSV_OUT}"
 
 asm_root="${RUNTIME_ROOT}/asm/${SUITE}/${LABEL}/${TARGET}-${OPT}"
 bin_root="${RUNTIME_ROOT}/bin/${SUITE}/${LABEL}/${TARGET}-${OPT}"
@@ -329,6 +346,8 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
   input_token_count="0"
   estimated_read_count="0"
   suspect_input_underflow="0"
+  frontend_path="unknown"
+  fallback_reason_codes="none"
 
   tmp_dir="$(mktemp -d "${log_root}/tmp.XXXXXX")"
   stdout_warm="${tmp_dir}/warm.out"
@@ -340,6 +359,7 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
   stdout_3="${tmp_dir}/run3.out"
   stderr_3="${tmp_dir}/run3.err"
   actual_file="${tmp_dir}/actual.out"
+  dialect_report_file="${tmp_dir}/dialect.report"
   timeout_sec="${RUNTIME_TIMEOUT_SEC}"
   is_perf_case=0
   if [[ "${kind}" == "perf" || "${suite}" != "official-functional" ]]; then
@@ -358,10 +378,29 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
   echo "[estimated_scalar_reads] ${estimated_read_count}" >>"${log_path}"
   echo "[suspect_input_underflow] ${suspect_input_underflow}" >>"${log_path}"
   echo "[compile] ${src}" >>"${log_path}"
+  if [[ -n "${SISY_COMPILER_EXTRA_ARGS}" ]]; then
+    echo "[compile_extra_args] ${SISY_COMPILER_EXTRA_ARGS}" >>"${log_path}"
+  fi
   set +e
-  compile_case "${src}" "${asm_path}" >>"${log_path}" 2>&1
+  compile_case "${src}" "${asm_path}" "${dialect_report_file}" >>"${log_path}" 2>&1
   compile_rc=$?
   set -e
+  if [[ -f "${dialect_report_file}" ]]; then
+    frontend_path="$(awk -F= '$1 == "frontend_path" { print $2; exit }' "${dialect_report_file}")"
+    fallback_reason_codes="$(awk -F= '$1 == "fallback_reason_codes" { print $2; exit }' "${dialect_report_file}")"
+  fi
+  if [[ -z "${frontend_path}" ]]; then
+    if [[ "${COMPILER_FLAVOR}" == "biframe" ]]; then
+      frontend_path="legacy-forced"
+    else
+      frontend_path="unknown"
+    fi
+  fi
+  if [[ -z "${fallback_reason_codes}" ]]; then
+    fallback_reason_codes="none"
+  fi
+  echo "[frontend_path] ${frontend_path}" >>"${log_path}"
+  echo "[fallback_reason_codes] ${fallback_reason_codes}" >>"${log_path}"
   if [[ "${compile_rc}" -ne 0 ]]; then
     if [[ "${compile_rc}" -ge 128 ]]; then
       status="compile_crash"
@@ -494,12 +533,13 @@ while IFS=, read -r suite tier kind case_id src in_file out_file enabled; do
     fi
   fi
 
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "${SUITE}" "${case_id}" "${TARGET}" "${OPT}" "${LABEL}" \
     "${status}" "${compare_status}" "${pass}" "${median_ms}" "${warmup_ms}" \
     "${run1_ms}" "${run2_ms}" "${run3_ms}" "${asm_path}" "${exe_path}" "${log_path}" \
     "${compile_status}" "${asm_emit_status}" "${link_status}" \
     "${input_token_count}" "${estimated_read_count}" "${suspect_input_underflow}" \
+    "${frontend_path}" "${fallback_reason_codes}" \
     >>"${CSV_OUT}"
 
   rm -rf "${tmp_dir}"

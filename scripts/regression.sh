@@ -12,6 +12,10 @@ CASE_DIR="$(realpath -m "$1")"
 TARGET="${2:-riscv}"
 OPT="${3:-O1}"
 EXTRA_ARGS=("${@:4}")
+if [[ -n "${SISY_COMPILER_EXTRA_ARGS:-}" ]]; then
+  # shellcheck disable=SC2206
+  EXTRA_ARGS+=(${SISY_COMPILER_EXTRA_ARGS})
+fi
 TAG="${OUT_TAG:-}"
 OUT_DIR="${ROOT_DIR}/tests/.out/${TARGET}-${OPT}"
 if [[ -n "${TAG}" ]]; then
