@@ -55,8 +55,10 @@ void appendArmBackend(sys::PassManager &pm, const sys::Options &opts) {
 
 void appendRvBackend(sys::PassManager &pm, const sys::Options &opts) {
   pm.addPass<sys::rv::Lower>();
-  pm.addPass<sys::rv::StrengthReduct>();
-  pm.addPass<sys::rv::InstCombine>();
+  if (getenvEnabled("SISY_RV_ENABLE_STRENGTH_REDUCT", true))
+    pm.addPass<sys::rv::StrengthReduct>();
+  if (getenvEnabled("SISY_RV_ENABLE_INST_COMBINE", true))
+    pm.addPass<sys::rv::InstCombine>();
   pm.addPass<sys::rv::RvDCE>();
   pm.addPass<sys::GVN>();
   pm.addPass<sys::rv::RegAlloc>();
