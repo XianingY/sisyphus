@@ -18,7 +18,10 @@ Sisyphus is a SysY compiler project for the 2025 compiler contest track.
   - `--verify-ir`
   - `--dump-pass-timing`
   - `--enable-experimental` (opt-in for experimental O1/O2 passes; off by default)
-  - `--enable-hir-pipeline` (enable staged HIR build/verify/canonicalize/lower path)
+  - `--use-legacy-codegen` (escape hatch during dialect migration)
+  - `--enable-hir-pipeline` / `--disable-hir-pipeline`
+  - `--dump-hir` / `--dump-cfg`
+  - `--verify-hir` / `--verify-cfg`
   - `--inline-threshold=<N>`
   - `--late-inline-threshold=<N>`
   - `--disable-loop-rotate`
@@ -57,8 +60,11 @@ cmake --build build -j
 # Aggressive profile
 ./build/compiler tests/smoke/basic.sy -S -o basic.rv.o2.s -O2
 
-# HIR staged frontend path (A/B with legacy path)
-./build/compiler tests/smoke/basic.sy -S -o basic.rv.hir.s -O2 --enable-hir-pipeline
+# Default frontend path is now dialect pipeline (HIR->CFG->legacy ModuleOp adapter)
+./build/compiler tests/smoke/basic.sy -S -o basic.rv.dialect.s -O2 --dump-cfg
+
+# Legacy fallback path for A/B and rollback
+./build/compiler tests/smoke/basic.sy -S -o basic.rv.legacy.s -O2 --use-legacy-codegen
 ```
 
 ## Smoke Test

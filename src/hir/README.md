@@ -6,11 +6,11 @@ This directory hosts a lightweight high-level IR layer inspired by MLIR/ClangIR 
 - `HIRBuilder.*`: AST -> HIR construction
 - `HIRVerifier.*`: structural/type/symbol checks
 - `HIRCanonicalize.*`: lightweight canonicalization (const fold + dead branch cleanup)
-- `HIRLowering.*`: bridge from HIR pipeline back to existing legacy IR codegen
+- `HIRLowering.*`: legacy bridge (kept for migration compatibility)
 
 Current rollout strategy:
 
-1. Default compilation path remains legacy (`AST -> CodeGen -> existing passes`).
-2. `--enable-hir-pipeline` enables staged flow:
-   `AST -> HIR build -> HIR verify -> HIR canonicalize -> HIR verify -> legacy lowering`.
+1. Default compilation path uses dialect frontend:
+   `AST -> HIR -> CFG -> legacy ModuleOp adapter`.
+2. `--use-legacy-codegen` switches back to legacy `AST -> CodeGen` path.
 3. Backend and existing O1/O2 pipelines remain unchanged.

@@ -26,17 +26,18 @@ Additional controls:
 - `--inline-threshold`, `--late-inline-threshold`
 - `--disable-loop-rotate`, `--enable-loop-rotate`, `--disable-const-unroll`
 - `--enable-experimental` (kept opt-in)
-- `--enable-hir-pipeline` (enable staged HIR frontend path)
+- `--enable-hir-pipeline`, `--disable-hir-pipeline`, `--use-legacy-codegen`
+- `--dump-hir`, `--dump-cfg`, `--verify-hir`, `--verify-cfg`
 
 ## Pipeline
 
-### Frontend Staging (optional)
+### Frontend Staging (default)
 
-When `--enable-hir-pipeline` is set:
+Default frontend path is dialect-based:
 
-- `AST -> HIR Build -> HIR Verify -> HIR Canonicalize -> HIR Verify -> Lower to legacy CFG/SSA IR`
-- Stage boundaries emit timing with `--dump-pass-timing` as `[hir-stage] ...`
-- Default path remains unchanged to preserve baseline stability
+- `AST -> HIR Build -> HIR Verify -> HIR Canonicalize -> HIR Verify -> HIR->CFG -> CFG Verify -> CFG->Legacy ModuleOp`
+- Stage boundaries emit timing with `--dump-pass-timing` as `[stage-timing] ...`
+- Legacy frontend remains available with `--use-legacy-codegen` for A/B rollback during migration
 
 ### O0 (stable baseline)
 
