@@ -75,12 +75,22 @@ bool verifyHIRLegalSet(const hir::Module &module, std::vector<std::string> &erro
 
 bool verifyCFGLegalSet(const Module &module, std::vector<std::string> &errors) {
   bool ok = true;
+  for (const auto &global : module.globals) {
+    if (global.name.empty()) {
+      errors.push_back("cfg legality: unnamed global symbol");
+      ok = false;
+    }
+  }
   if (module.funcs.empty()) {
     errors.push_back("cfg legality: no function");
     return false;
   }
 
   for (const auto &func : module.funcs) {
+    if (func.name.empty()) {
+      errors.push_back("cfg legality: unnamed function");
+      ok = false;
+    }
     for (const auto &bb : func.blocks) {
       for (const auto &inst : bb.insts) {
         if (!isLegalCFGKind(inst.kind)) {

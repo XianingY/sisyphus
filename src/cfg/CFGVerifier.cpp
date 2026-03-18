@@ -36,6 +36,12 @@ bool verify(const Module &module, std::vector<std::string> &errors) {
 
   bool ok = true;
   for (const auto &func : module.funcs) {
+    for (const auto &param : func.params) {
+      if (param.name.empty()) {
+        errors.push_back("cfg verifier: func @" + func.name + " has unnamed parameter");
+        ok = false;
+      }
+    }
     if (func.blocks.empty()) {
       errors.push_back("cfg verifier: func @" + func.name + " has no block");
       ok = false;
@@ -65,6 +71,14 @@ bool verify(const Module &module, std::vector<std::string> &errors) {
           firstNonPhi = i;
         if (inst.kind == OpKind::Phi && firstNonPhi != -1) {
           errors.push_back("cfg verifier: phi must appear before non-phi at " + where(func, bid));
+          ok = false;
+        }
+        if ((inst.kind == OpKind::Load || inst.kind == OpKind::Store) && inst.memSize == 0) {
+          errors.push_back("cfg verifier: load/store missing mem size at " + where(func, bid));
+          ok = false;
+        }
+        if (inst.kind == OpKind::Call && inst.calleeArgTypes.size() != inst.args.size()) {
+          errors.push_back("cfg verifier: call signature mismatch at " + where(func, bid));
           ok = false;
         }
         if (isTerminator(inst.kind) && i != (int) bb.insts.size() - 1) {

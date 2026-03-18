@@ -163,7 +163,10 @@ std::unique_ptr<Op> Builder::buildNode(ASTNode *node) {
     auto op = std::make_unique<Op>(OpKind::Store, node);
     op->type = mapType(node->type);
     op->symbol = assignTargetName(n->l);
-    op->append(buildNode(n->l));
+    if (auto *lhsArr = dyn_cast<ArrayAccessNode>(n->l)) {
+      for (auto *idx : lhsArr->indices)
+        op->append(buildNode(idx));
+    }
     op->append(buildNode(n->r));
     return op;
   }
@@ -217,7 +220,10 @@ std::unique_ptr<Op> Builder::buildNode(ASTNode *node) {
   if (auto *n = dyn_cast<FnDeclNode>(node)) {
     auto op = std::make_unique<Op>(OpKind::Func, node);
     op->symbol = n->name;
-    op->type = mapType(node->type);
+    if (auto *fnTy = dyn_cast<FunctionType>(node->type))
+      op->type = mapType(fnTy->ret);
+    else
+      op->type = mapType(node->type);
     op->append(buildBlockLike(n->body));
     return op;
   }
