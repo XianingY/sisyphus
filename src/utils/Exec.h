@@ -66,7 +66,7 @@ class Interpreter {
   void addRange(std::vector<MemoryRange> &ranges, intptr_t addr, size_t size);
 
   unsigned retcode;
-  size_t stepLimit = 20000000;
+  size_t stepLimit = 800000000;
   size_t stepCount = 0;
   bool executionTimedOut = false;
   std::unordered_map<Op*, size_t> loadSizeCache;

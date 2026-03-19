@@ -1,5 +1,6 @@
 #include "RvPasses.h"
 #include "Regs.h"
+#include "../backend/shared/RegAllocHotness.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -138,7 +139,7 @@ std::map<std::string, int> RegAlloc::stats() {
 std::string getValueNumber(Value value);
 
 // For debug purposes
-void dumpInterf(Region *region, const std::unordered_map<Op*, std::set<Op*>> &interf) {
+void dumpInterf(Region *region, const std::unordered_map<Op*, std::unordered_set<Op*>> &interf) {
   region->dump(std::cerr, /*depth=*/1);
   std::cerr << "\n\n===== interference graph =====\n\n";
   for (auto [k, v] : interf) {
@@ -172,7 +173,7 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
 
   Builder builder;
   
-  std::map<Op*, Reg> assignment;
+  std::unordered_map<Op*, Reg> assignment;
 
   auto funcOp = region->getParent();
 
@@ -265,49 +266,26 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
 
   // Build a coarse block hotness model for spill heuristics:
   // back-edge blocks are likely loop bodies; call-heavy blocks are also hot.
-  std::unordered_map<BasicBlock*, int> bbIndex;
-  std::unordered_map<BasicBlock*, int> bbWeight;
-  int idx = 0;
-  for (auto bb : region->getBlocks())
-    bbIndex[bb] = idx++;
-  for (auto bb : region->getBlocks()) {
-    int w = 1;
-    if (bb->getOpCount() == 0) {
-      bbWeight[bb] = w;
-      continue;
-    }
-    auto term = bb->getLastOp();
-    bool hasBackEdge = false;
-    if (auto target = term->find<TargetAttr>()) {
-      if (bbIndex.count(target->bb))
-        hasBackEdge = hasBackEdge || (bbIndex[target->bb] <= bbIndex[bb]);
-    }
-    if (auto ifnot = term->find<ElseAttr>()) {
-      if (bbIndex.count(ifnot->bb))
-        hasBackEdge = hasBackEdge || (bbIndex[ifnot->bb] <= bbIndex[bb]);
-    }
-    if (hasBackEdge)
-      w *= 8;
-    for (auto op : bb->getOps()) {
-      if (isa<CallOp>(op)) {
-        w *= 2;
-        break;
-      }
-    }
-    bbWeight[bb] = w;
-  }
+  auto bbWeight = sys::backend::shared::computeBlockHotness(region, [](Op *op) {
+    return isa<CallOp>(op);
+  });
 
-  // Interference graph.
-  std::unordered_map<Op*, std::set<Op*>> interf, spillInterf;
-  std::unordered_map<Op*, long long> spillWeight;
-  std::unordered_map<Op*, int> callSpan;
+  std::unordered_map<Op*, int> spillOffset;
+  int currentOffset = STACKOFF(funcOp);
+  int highest = 0;
 
-  // Values of readreg, or operands of writereg, or phis (mvs), are prioritzed.
-  std::unordered_map<Op*, int> priority;
-  // The `key` is preferred to have the same value as `value`.
-  std::unordered_map<Op*, Op*> prefer;
-  // Maps a phi to its operands.
-  std::unordered_map<Op*, std::vector<Op*>> phiOperand;
+  if (!fastMode) {
+    // Interference graph.
+    std::unordered_map<Op*, std::unordered_set<Op*>> interf, spillInterf;
+    std::unordered_map<Op*, long long> spillWeight;
+    std::unordered_map<Op*, int> callSpan;
+
+    // Values of readreg, or operands of writereg, or phis (mvs), are prioritzed.
+    std::unordered_map<Op*, int> priority;
+    // The `key` is preferred to have the same value as `value`.
+    std::unordered_map<Op*, Op*> prefer;
+    // Maps a phi to its operands.
+    std::unordered_map<Op*, std::vector<Op*>> phiOperand;
 
   int currentPriority = 2;
   for (auto bb : region->getBlocks()) {
@@ -352,14 +330,15 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
         priority[op] = currentPriority + 1;
         for (auto x : op->getOperands()) {
           priority[x.defining] = currentPriority;
-          prefer[x.defining] = op;
+          if (!fastMode)
+            prefer[x.defining] = op;
           phiOperand[op].push_back(x.defining);
         }
         currentPriority += 2;
       }
 
       // Preserve copy chains to reduce move pressure after allocation.
-      if ((isa<MvOp>(op) || isa<FmvOp>(op)) && op->getOperandCount() == 1) {
+      if (!fastMode && (isa<MvOp>(op) || isa<FmvOp>(op)) && op->getOperandCount() == 1) {
         auto src = op->DEF(0);
         prefer[op] = src;
         bumpPriority(op, currentPriority + 2);
@@ -373,11 +352,14 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       lastUsed[op] = ops.size();
 
     // Penalize long-lived values and values spanning calls.
-    std::vector<int> callPrefix(ops.size() + 1, 0);
-    int callIdx = 0;
-    for (auto liveOp : ops) {
-      callPrefix[callIdx + 1] = callPrefix[callIdx] + (isa<CallOp>(liveOp) ? 1 : 0);
-      callIdx++;
+    std::vector<int> callPrefix;
+    if (!fastMode) {
+      callPrefix.assign(ops.size() + 1, 0);
+      int callIdx = 0;
+      for (auto liveOp : ops) {
+        callPrefix[callIdx + 1] = callPrefix[callIdx] + (isa<CallOp>(liveOp) ? 1 : 0);
+        callIdx++;
+      }
     }
     for (auto [op, last] : lastUsed) {
       int def = defined[op];
@@ -386,11 +368,13 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       int span = last - def;
       spillWeight[op] += 3LL * localWeight * span;
 
-      int l = std::max(0, def + 1);
-      int r = std::min<int>(ops.size(), last);
-      int callCount = callPrefix[r] - callPrefix[l];
-      callSpan[op] = std::max(callSpan[op], callCount);
-      spillWeight[op] += 96LL * localWeight * callCount;
+      if (!fastMode) {
+        int l = std::max(0, def + 1);
+        int r = std::min<int>(ops.size(), last);
+        int callCount = callPrefix[r] - callPrefix[l];
+        callSpan[op] = std::max(callSpan[op], callCount);
+        spillWeight[op] += 96LL * localWeight * callCount;
+      }
     }
 
     // We use event-driven approach to optimize it into O(n log n + E).
@@ -437,39 +421,35 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
     }
   }
 
-  std::vector<Op*> ops;
-  std::unordered_set<Op*> visitedOps;
-  for (auto [k, v] : interf)
-    if (!visitedOps.count(k)) {
-      ops.push_back(k);
-      visitedOps.insert(k);
-    }
-  // Even though registers in `priority` might not be colliding,
-  // we still allocate them here to respect their preference.
-  for (auto [k, v] : priority)
-    if (!visitedOps.count(k)) {
-      ops.push_back(k);
-      visitedOps.insert(k);
-    }
+    std::vector<Op*> ops;
+    std::unordered_set<Op*> visitedOps;
+    for (auto [k, v] : interf)
+      if (!visitedOps.count(k)) {
+        ops.push_back(k);
+        visitedOps.insert(k);
+      }
+    // Even though registers in `priority` might not be colliding,
+    // we still allocate them here to respect their preference.
+    for (auto [k, v] : priority)
+      if (!visitedOps.count(k)) {
+        ops.push_back(k);
+        visitedOps.insert(k);
+      }
 
-  // Sort by **descending** degree.
-  std::sort(ops.begin(), ops.end(), [&](Op *a, Op *b) {
-    auto pa = priority[a];
-    auto pb = priority[b];
-    if (pa != pb)
-      return pa > pb;
-    if (spillWeight[a] != spillWeight[b])
-      return spillWeight[a] > spillWeight[b];
-    if (interf[a].size() != interf[b].size())
-      return interf[a].size() > interf[b].size();
-    return a < b;
-  });
+    // Sort by **descending** degree.
+    std::sort(ops.begin(), ops.end(), [&](Op *a, Op *b) {
+      auto pa = priority[a];
+      auto pb = priority[b];
+      if (pa != pb)
+        return pa > pb;
+      if (spillWeight[a] != spillWeight[b])
+        return spillWeight[a] > spillWeight[b];
+      if (interf[a].size() != interf[b].size())
+        return interf[a].size() > interf[b].size();
+      return a < b;
+    });
 
-  std::unordered_map<Op*, int> spillOffset;
-  int currentOffset = STACKOFF(funcOp);
-  int highest = 0;
-
-  for (auto op : ops) {
+    for (auto op : ops) {
     // Do not allocate colored instructions.
     if (assignment.count(op))
       continue;
@@ -589,19 +569,37 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
     spillOffset[op] = desired;
 
     // Update `highest`, which will indicate the size allocated.
-    if (desired > highest)
-      highest = desired;
+      if (desired > highest)
+        highest = desired;
+    }
+  } else {
+    // Huge-module fast path: avoid O(N^2) interference construction in regalloc.
+    // Conservatively spill all allocatable SSA values to keep correctness.
+    int nextOffset = currentOffset;
+    for (auto bb : region->getBlocks()) {
+      for (auto op : bb->getOps()) {
+        if (!op || assignment.count(op) || spillOffset.count(op))
+          continue;
+        if (op->getResultType() == Value::unit)
+          continue;
+        spillOffset[op] = nextOffset;
+        highest = nextOffset;
+        nextOffset += 8;
+        spilled++;
+      }
+    }
   }
 
   // Only a single register is spilled. Let's use s10.
-  if (highest == currentOffset) {
+  // Fast mode keeps spill semantics simple and uniform (stack-only).
+  if (!fastMode && highest == currentOffset) {
     for (auto [op, _] : spillOffset)
       assignment[op] = fpreg(op->getResultType()) ? fspillReg : spillReg;
     spillOffset.clear();
   }
 
   // Only 2 registers are spilled. Let's use s10 and s11..
-  if (highest == currentOffset + 8) {
+  if (!fastMode && highest == currentOffset + 8) {
     for (auto [op, offset] : spillOffset) {
       auto fp = fpreg(op->getResultType());
       assignment[op] = offset ? (fp ? fspillReg2 : spillReg2) : (fp ? fspillReg : spillReg);
@@ -610,7 +608,7 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
   }
 
   // If possible, map some offsets to floating-point registers.
-  if (spillOffset.size()) {
+  if (!fastMode && spillOffset.size()) {
     // Try to reuse floating-point registers for spilling.
     std::unordered_set<Reg> used;
     for (auto [op, x] : assignment) {

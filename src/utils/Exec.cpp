@@ -215,7 +215,11 @@ void Interpreter::exec(Op *op) {
   EXEC_BINARY(LShiftOp, <<);
   
   EXEC_BINARY_L(AddLOp, +);
+  EXEC_BINARY_L(SubLOp, -);
   EXEC_BINARY_L(MulLOp, *);
+  EXEC_BINARY_L(DivLOp, /);
+  EXEC_BINARY_L(ModLOp, %);
+  EXEC_BINARY_L(LShiftLOp, <<);
   EXEC_BINARY_L(RShiftLOp, >>);
 
   EXEC_BINARY_F(AddFOp, +);

@@ -1,5 +1,6 @@
 #include "ArmPasses.h"
 #include "Regs.h"
+#include "../backend/shared/RegAllocHotness.h"
 #include <algorithm>
 #include <unordered_set>
 
@@ -64,8 +65,12 @@ bool fitsAddImm12(int imm) {
   return imm >= -4095 && imm <= 4095;
 }
 
-bool fitsMemImm14(int imm) {
-  return imm >= 0 && imm < 16384;
+bool fitsMemImm32(int imm) {
+  return imm >= 0 && imm <= 16380 && imm % 4 == 0;
+}
+
+bool fitsMemImm64(int imm) {
+  return imm >= 0 && imm <= 32760 && imm % 8 == 0;
 }
 
 void materializeSpAddr(Builder &builder, Reg tmp, int offset) {
@@ -78,7 +83,7 @@ void materializeSpAddr(Builder &builder, Reg tmp, int offset) {
 }
 
 void emitStackStore(Builder &builder, Reg src, bool fp, int offset, Reg addrTmp) {
-  if (fitsMemImm14(offset)) {
+  if ((fp && fitsMemImm32(offset)) || (!fp && fitsMemImm64(offset))) {
     if (fp)
       builder.create<StrFOp>({ RSC(src), RS2C(Reg::sp), new IntAttr(offset) });
     else
@@ -94,7 +99,7 @@ void emitStackStore(Builder &builder, Reg src, bool fp, int offset, Reg addrTmp)
 }
 
 void emitStackLoad(Builder &builder, Reg dst, bool fp, int offset, Reg addrTmp) {
-  if (fitsMemImm14(offset)) {
+  if ((fp && fitsMemImm32(offset)) || (!fp && fitsMemImm64(offset))) {
     if (fp)
       builder.create<LdrFOp>({ RDC(dst), RSC(Reg::sp), new IntAttr(offset) });
     else
@@ -163,7 +168,7 @@ struct Event {
 }
 
 // Defined in rv/RegAlloc.cpp.
-void dumpInterf(Region *region, const std::unordered_map<Op*, std::set<Op*>> &interf);
+void dumpInterf(Region *region, const std::unordered_map<Op*, std::unordered_set<Op*>> &interf);
 
 void RegAlloc::runImpl(Region *region, bool isLeaf) {
   const Reg *order = isLeaf ? leafOrder : normalOrder;
@@ -173,7 +178,7 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
 
   Builder builder;
   
-  std::map<Op*, Reg> assignment;
+  std::unordered_map<Op*, Reg> assignment;
 
   auto funcOp = region->getParent();
 
@@ -278,49 +283,25 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
 
   // Build a coarse block hotness model for spill heuristics:
   // back-edge blocks are likely loop bodies; call-like blocks are hotter.
-  std::unordered_map<BasicBlock*, int> bbIndex;
-  std::unordered_map<BasicBlock*, int> bbWeight;
-  int idx = 0;
-  for (auto bb : region->getBlocks())
-    bbIndex[bb] = idx++;
-  for (auto bb : region->getBlocks()) {
-    int w = 1;
-    if (bb->getOpCount() == 0) {
-      bbWeight[bb] = w;
-      continue;
-    }
-    auto term = bb->getLastOp();
-    bool hasBackEdge = false;
-    if (auto target = term->find<TargetAttr>()) {
-      if (bbIndex.count(target->bb))
-        hasBackEdge = hasBackEdge || (bbIndex[target->bb] <= bbIndex[bb]);
-    }
-    if (auto ifnot = term->find<ElseAttr>()) {
-      if (bbIndex.count(ifnot->bb))
-        hasBackEdge = hasBackEdge || (bbIndex[ifnot->bb] <= bbIndex[bb]);
-    }
-    if (hasBackEdge)
-      w *= 8;
-    for (auto op : bb->getOps()) {
-      if (isa<BlOp>(op) || isa<CloneOp>(op) || isa<JoinOp>(op)) {
-        w *= 2;
-        break;
-      }
-    }
-    bbWeight[bb] = w;
-  }
+  auto bbWeight = sys::backend::shared::computeBlockHotness(region, [](Op *op) {
+    return isa<BlOp>(op) || isa<CloneOp>(op) || isa<JoinOp>(op);
+  });
 
-  // Interference graph.
-  std::unordered_map<Op*, std::set<Op*>> interf, spillInterf;
-  std::unordered_map<Op*, long long> spillWeight;
-  std::unordered_map<Op*, int> callSpan;
+  std::unordered_map<Op*, int> spillOffset;
+  int currentOffset = STACKOFF(funcOp);
+  int highest = 0;
+  if (!fastMode) {
+    // Interference graph.
+    std::unordered_map<Op*, std::unordered_set<Op*>> interf, spillInterf;
+    std::unordered_map<Op*, long long> spillWeight;
+    std::unordered_map<Op*, int> callSpan;
 
-  // Values of readreg, or operands of writereg, or phis (mvs), are prioritzed.
-  std::unordered_map<Op*, int> priority;
-  // The `key` is preferred to have the same value as `value`.
-  std::unordered_map<Op*, Op*> prefer;
-  // Maps a phi to its operands.
-  std::unordered_map<Op*, std::vector<Op*>> phiOperand;
+    // Values of readreg, or operands of writereg, or phis (mvs), are prioritzed.
+    std::unordered_map<Op*, int> priority;
+    // The `key` is preferred to have the same value as `value`.
+    std::unordered_map<Op*, Op*> prefer;
+    // Maps a phi to its operands.
+    std::unordered_map<Op*, std::vector<Op*>> phiOperand;
 
   int currentPriority = 2;
   for (auto bb : region->getBlocks()) {
@@ -331,7 +312,7 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
         priority[x] = v;
     };
     // Scan through the block and see the place where the value's last used.
-    std::map<Op*, int> lastUsed, defined;
+    std::unordered_map<Op*, int> lastUsed, defined;
     const auto &ops = bb->getOps();
     auto it = ops.end();
     for (int i = (int) ops.size() - 1; i >= 0; i--) {
@@ -365,14 +346,15 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
         priority[op] = currentPriority + 1;
         for (auto x : op->getOperands()) {
           priority[x.defining] = currentPriority;
-          prefer[x.defining] = op;
+          if (!fastMode)
+            prefer[x.defining] = op;
           phiOperand[op].push_back(x.defining);
         }
         currentPriority += 2;
       }
 
       // Preserve copy chains to reduce move pressure after allocation.
-      if ((isa<MovROp>(op) || isa<FmovOp>(op)) && op->getOperandCount() == 1) {
+      if (!fastMode && (isa<MovROp>(op) || isa<FmovOp>(op)) && op->getOperandCount() == 1) {
         auto src = op->DEF(0);
         prefer[op] = src;
         bumpPriority(op, currentPriority + 2);
@@ -386,12 +368,15 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       lastUsed[op] = ops.size();
 
     // Penalize long-lived values and values spanning call-like operations.
-    std::vector<int> callPrefix(ops.size() + 1, 0);
-    int callIdx = 0;
-    for (auto liveOp : ops) {
-      bool isCallLike = isa<BlOp>(liveOp) || isa<CloneOp>(liveOp) || isa<JoinOp>(liveOp);
-      callPrefix[callIdx + 1] = callPrefix[callIdx] + (isCallLike ? 1 : 0);
-      callIdx++;
+    std::vector<int> callPrefix;
+    if (!fastMode) {
+      callPrefix.assign(ops.size() + 1, 0);
+      int callIdx = 0;
+      for (auto liveOp : ops) {
+        bool isCallLike = isa<BlOp>(liveOp) || isa<CloneOp>(liveOp) || isa<JoinOp>(liveOp);
+        callPrefix[callIdx + 1] = callPrefix[callIdx] + (isCallLike ? 1 : 0);
+        callIdx++;
+      }
     }
     for (auto [op, last] : lastUsed) {
       int def = defined[op];
@@ -400,11 +385,13 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       int span = last - def;
       spillWeight[op] += 3LL * localWeight * span;
 
-      int l = std::max(0, def + 1);
-      int r = std::min<int>(ops.size(), last);
-      int callCount = callPrefix[r] - callPrefix[l];
-      callSpan[op] = std::max(callSpan[op], callCount);
-      spillWeight[op] += 128LL * localWeight * callCount;
+      if (!fastMode) {
+        int l = std::max(0, def + 1);
+        int r = std::min<int>(ops.size(), last);
+        int callCount = callPrefix[r] - callPrefix[l];
+        callSpan[op] = std::max(callSpan[op], callCount);
+        spillWeight[op] += 128LL * localWeight * callCount;
+      }
     }
 
     // We use event-driven approach to optimize it into O(n log n + E).
@@ -424,7 +411,7 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       return a.timestamp == b.timestamp ? (!a.start && b.start) : a.timestamp < b.timestamp;
     });
 
-    std::set<Op*> active;
+    std::unordered_set<Op*> active;
     for (const auto& event : events) {
       auto op = event.op;
       // Jumps will never interfere.
@@ -450,48 +437,45 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
     }
   }
 
-  std::vector<Op*> ops;
-  std::unordered_set<Op*> visitedOps;
-  for (auto [k, v] : interf)
-    if (!visitedOps.count(k)) {
-      ops.push_back(k);
-      visitedOps.insert(k);
-    }
-  // Even though registers in `priority` might not be colliding,
-  // we still allocate them here to respect their preference.
-  for (auto [k, v] : priority)
-    if (!visitedOps.count(k)) {
-      ops.push_back(k);
-      visitedOps.insert(k);
-    }
+    std::vector<Op*> ops;
+    std::unordered_set<Op*> visitedOps;
+    for (auto [k, v] : interf)
+      if (!visitedOps.count(k)) {
+        ops.push_back(k);
+        visitedOps.insert(k);
+      }
+    // Even though registers in `priority` might not be colliding,
+    // we still allocate them here to respect their preference.
+    for (auto [k, v] : priority)
+      if (!visitedOps.count(k)) {
+        ops.push_back(k);
+        visitedOps.insert(k);
+      }
 
-  // Sort by **descending** degree.
-  std::sort(ops.begin(), ops.end(), [&](Op *a, Op *b) {
-    auto pa = priority[a];
-    auto pb = priority[b];
-    if (pa != pb)
-      return pa > pb;
-    if (spillWeight[a] != spillWeight[b])
-      return spillWeight[a] > spillWeight[b];
-    if (interf[a].size() != interf[b].size())
-      return interf[a].size() > interf[b].size();
-    return a < b;
-  });
+    // Sort by **descending** degree.
+    std::sort(ops.begin(), ops.end(), [&](Op *a, Op *b) {
+      auto pa = priority[a];
+      auto pb = priority[b];
+      if (pa != pb)
+        return pa > pb;
+      if (spillWeight[a] != spillWeight[b])
+        return spillWeight[a] > spillWeight[b];
+      if (interf[a].size() != interf[b].size())
+        return interf[a].size() > interf[b].size();
+      return a < b;
+    });
 
-  std::unordered_map<Op*, int> spillOffset;
-  int currentOffset = STACKOFF(funcOp);
-  int highest = 0;
-  auto isAllocatable = [&](Reg reg, bool fp) {
-    auto rcnt = fp ? regcountf : regcount;
-    auto rorder = fp ? orderf : order;
-    for (int i = 0; i < rcnt; i++) {
-      if (rorder[i] == reg)
-        return true;
-    }
-    return false;
-  };
+    auto isAllocatable = [&](Reg reg, bool fp) {
+      auto rcnt = fp ? regcountf : regcount;
+      auto rorder = fp ? orderf : order;
+      for (int i = 0; i < rcnt; i++) {
+        if (rorder[i] == reg)
+          return true;
+      }
+      return false;
+    };
 
-  for (auto op : ops) {
+    for (auto op : ops) {
     // Do not allocate colored instructions.
     if (assignment.count(op))
       continue;
@@ -609,8 +593,25 @@ skip_prefer_assign:
     spillOffset[op] = desired;
 
     // Update `highest`, which will indicate the size allocated.
-    if (desired > highest)
-      highest = desired;
+      if (desired > highest)
+        highest = desired;
+    }
+  } else {
+    // Huge-module fast path: avoid O(N^2) interference construction in regalloc.
+    // Conservatively spill all allocatable SSA values to keep correctness.
+    int nextOffset = currentOffset;
+    for (auto bb : region->getBlocks()) {
+      for (auto op : bb->getOps()) {
+        if (!op || assignment.count(op) || spillOffset.count(op))
+          continue;
+        if (op->getResultType() == Value::unit)
+          continue;
+        spillOffset[op] = nextOffset;
+        highest = nextOffset;
+        nextOffset += 8;
+        spilled++;
+      }
+    }
   }
 
   // Keep spilled values in stack slots consistently.
