@@ -90,10 +90,23 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, const Pipeline
   const bool enableO2Experimental = plan.enableO2Experimental;
   const bool enableO1LiteTail = !aggressive;
   const bool armSafeStructured = opts.arm && !aggressive;
+  const bool economyMode = plan.largeModuleMode;
 
   pm.addPass<sys::MoveAlloca>();
 
   auto appendLoweredTail = [&]() {
+    if (economyMode) {
+      pm.addPass<sys::FlattenCFG>();
+      pm.addPass<sys::Mem2Reg>();
+      pm.addPass<sys::RegularFold>();
+      pm.addPass<sys::DCE>();
+      pm.addPass<sys::SimplifyCFG>();
+      pm.addPass<sys::Select>();
+      pm.addPass<sys::DCE>();
+      pm.addPass<sys::InstSchedule>();
+      return;
+    }
+
     // ARM keeps a conservative mid-end tail for stability on open-perf
     // correctness-sensitive families. Run an extra CFG cleanup after select to
     // ensure phi/pred consistency in edge-case structured lowering patterns.
@@ -127,7 +140,7 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, const Pipeline
     pm.addPass<sys::DSE>();
     pm.addPass<sys::DLE>();
     pm.addPass<sys::GVN>();
-    if (aggressive || enableO1LiteTail)
+    if ((aggressive || enableO1LiteTail) && !economyMode)
       pm.addPass<sys::Reassociate>();
 
     pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
@@ -149,15 +162,19 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, const Pipeline
     pm.addPass<sys::SimplifyCFG>();
     pm.addPass<sys::Alias>();
     pm.addPass<sys::DAE>();
-    pm.addPass<sys::DSE>();
-    pm.addPass<sys::DLE>();
+    // Keep O1 dialect path conservative: this late DSE/DLE round can
+    // over-stress complex scope-heavy CFGs and trigger instability.
+    if (plan.frontendProfile != FrontendProfile::Dialect) {
+      pm.addPass<sys::DSE>();
+      pm.addPass<sys::DLE>();
+    }
     pm.addPass<sys::Select>();
-    if (aggressive || enableO1LiteTail) {
+    if ((aggressive || enableO1LiteTail) && !economyMode) {
       pm.addPass<sys::Range>();
       pm.addPass<sys::RangeAwareFold>();
       pm.addPass<sys::Splice>();
     }
-    if (enableO1LiteTail) {
+    if (enableO1LiteTail && !economyMode) {
       pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
       pm.addPass<sys::LICM>();
       pm.addPass<sys::SCEV>();
@@ -174,8 +191,10 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, const Pipeline
     pm.addPass<sys::RegularFold>();
     pm.addPass<sys::GVN>();
     pm.addPass<sys::Alias>();
-    pm.addPass<sys::DSE>();
-    pm.addPass<sys::DLE>();
+    if (plan.frontendProfile != FrontendProfile::Dialect) {
+      pm.addPass<sys::DSE>();
+      pm.addPass<sys::DLE>();
+    }
     pm.addPass<sys::DCE>();
     pm.addPass<sys::InlineStore>();
     if (enableO2Experimental && plan.enableO2Heavy)
@@ -187,7 +206,7 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, const Pipeline
     pm.addPass<sys::GCM>();
     pm.addPass<sys::GVN>();
 
-    int loopRounds = aggressive ? plan.o2LoopRounds : 3;
+    int loopRounds = aggressive ? plan.o2LoopRounds : (economyMode ? 1 : 3);
     for (int i = 0; i < loopRounds; i++) {
       pm.addPass<sys::CanonicalizeLoop>(/*lcssa=*/ true);
       pm.addPass<sys::LICM>();
@@ -287,7 +306,7 @@ const char *frontendProfileName(FrontendProfile profile) {
 
 }  // namespace
 
-PipelinePlan selectPlan(const Options &opts) {
+PipelinePlan selectPlan(const Options &opts, PipelineMetrics metrics) {
   PipelinePlan plan;
   plan.frontendProfile = opts.useLegacyCodegen ? FrontendProfile::Legacy : FrontendProfile::Dialect;
   if (opts.o2)
@@ -301,13 +320,24 @@ PipelinePlan selectPlan(const Options &opts) {
   plan.enableO2Experimental = opts.o2 && !opts.disableO2Experimental;
   plan.enableO2Heavy = plan.enableO2Experimental && getenvEnabled("SISY_O2_ENABLE_HEAVY", true);
   plan.o2LoopRounds = getenvPositive("SISY_O2_LOOP_ROUNDS", 3, 1, 8);
+  plan.metrics = metrics;
+
+  const bool largeModeEnabled = getenvEnabled("SISY_O2_LARGE_MODE", true);
+  const size_t opThreshold = (size_t) getenvPositive("SISY_O2_LARGE_THRESHOLD_OPS", 1800, 1000, 2000000);
+  const size_t edgeThreshold = (size_t) getenvPositive("SISY_O2_LARGE_THRESHOLD_CFG_EDGES", 12000, 100, 5000000);
+  const int depthThreshold = getenvPositive("SISY_O2_LARGE_THRESHOLD_LOOP_DEPTH", 8, 1, 256);
+  const bool hitOps = plan.metrics.moduleOpCount >= opThreshold;
+  const bool hitEdges = plan.metrics.cfgEdgeCount >= edgeThreshold;
+  const bool hitDepth = plan.metrics.maxLoopDepth >= depthThreshold;
+  // O2-only downshift for super-complex IR; O1 remains stable baseline.
+  plan.largeModuleMode = plan.aggressive && largeModeEnabled && (hitOps || hitEdges || hitDepth);
   plan.useArmBackend = opts.arm;
   plan.useRvBackend = opts.rv;
   return plan;
 }
 
-PipelinePlan configurePipeline(PassManager &pm, const Options &opts) {
-  auto plan = selectPlan(opts);
+PipelinePlan configurePipeline(PassManager &pm, const Options &opts, PipelineMetrics metrics) {
+  auto plan = selectPlan(opts, metrics);
   switch (plan.coreProfile) {
   case CoreProfile::O0:
     appendCoreO0(pm);
@@ -330,6 +360,10 @@ std::string formatPlan(const PipelinePlan &plan) {
   oss << "frontend=" << frontendProfileName(plan.frontendProfile)
       << ", core=" << coreProfileName(plan.coreProfile)
       << ", aggressive=" << (plan.aggressive ? "1" : "0")
+      << ", module_ops=" << plan.metrics.moduleOpCount
+      << ", cfg_edges=" << plan.metrics.cfgEdgeCount
+      << ", loop_depth=" << plan.metrics.maxLoopDepth
+      << ", large_module_mode=" << (plan.largeModuleMode ? "1" : "0")
       << ", o2_experimental=" << (plan.enableO2Experimental ? "1" : "0")
       << ", o2_heavy=" << (plan.enableO2Heavy ? "1" : "0")
       << ", o2_loop_rounds=" << plan.o2LoopRounds

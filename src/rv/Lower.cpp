@@ -339,6 +339,15 @@ void Lower::run() {
     builder.setBeforeOp(op);
     const auto &args = op->getOperands();
 
+    auto freezeArgIfSp = [&](Value arg) -> Value {
+      auto *def = arg.defining;
+      if (!def || !isa<ReadRegOp>(def) || REG(def) != Reg::sp)
+        return arg;
+      // Snapshot stack-pointer based arguments before call-frame adjustment.
+      auto zero = builder.create<ReadRegOp>(Value::i32, { new RegAttr(Reg::zero) });
+      return builder.create<AddOp>({ arg, zero });
+    };
+
     std::vector<std::pair<Value, Reg>> argRegWrites;
     std::vector<std::pair<Value, Reg>> fargRegWrites;
     std::vector<Value> argsNew;
@@ -347,7 +356,7 @@ void Lower::run() {
     int cnt = 0;
     int fcnt = 0;
     for (size_t i = 0; i < args.size(); i++) {
-      Value arg = args[i];
+      Value arg = freezeArgIfSp(args[i]);
       auto ty = arg.defining->getResultType();
       if (ty == Value::f32 && fcnt < 8) {
         fargRegWrites.push_back({ arg, fregs[fcnt] });

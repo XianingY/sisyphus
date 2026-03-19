@@ -41,6 +41,9 @@ class Interpreter {
   };
   std::vector<MemoryRange> globalRanges;
   std::vector<MemoryRange> stackRanges;
+  mutable bool lastValidCached = false;
+  mutable uintptr_t lastValidBegin = 0;
+  mutable uintptr_t lastValidEnd = 0;
 
   SymbolTable value;
   // Used for phi functions.
@@ -66,6 +69,8 @@ class Interpreter {
   size_t stepLimit = 20000000;
   size_t stepCount = 0;
   bool executionTimedOut = false;
+  std::unordered_map<Op*, size_t> loadSizeCache;
+  std::unordered_map<Op*, size_t> storeSizeCache;
   int *cache = nullptr;
   int cache_type = 0;
 
@@ -77,7 +82,7 @@ class Interpreter {
     ~SemanticScope() { parent.value = table; }
   };
 public:
-  Interpreter(ModuleOp *module);
+  Interpreter(ModuleOp *module, size_t explicitStepLimit = 0);
   ~Interpreter();
 
   void run(std::istream &input);

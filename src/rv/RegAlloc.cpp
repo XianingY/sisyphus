@@ -254,7 +254,7 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       op->moveToStart(entry);
       builder.setBeforeOp(op);
       builder.create<PlaceHolderOp>({ argHolders[cnt] });
-      builder.replace<ReadRegOp>(op, Value::i32, { new RegAttr(argRegs[cnt]) });
+      builder.replace<ReadRegOp>(op, ty, { new RegAttr(argRegs[cnt]) });
       cnt++;
       continue;
     }
@@ -520,7 +520,10 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
     }
     if (isa<ReadRegOp>(op)) {
       auto reg = REG(op);
-      if (!bad.count(reg))
+      // `readreg sp` is a snapshot value in SSA.
+      // Mapping it back to physical `sp` breaks semantics after later SubSpOp
+      // adjustments (value should remain the old stack pointer).
+      if (reg != Reg::sp && !bad.count(reg))
         preferred = (int) reg;
     }
 
@@ -721,6 +724,22 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
   // As RdAttr is supplied, though `assignment[]` won't have the new op recorded, it's fine.
   runRewriter(funcOp, [&](WriteRegOp *op) {
     builder.setBeforeOp(op);
+    auto src = op->DEF(0);
+    auto dst = REG(op);
+
+    // Rematerialize immediates directly at the write site to avoid relying on
+    // long-lived constant carrier registers that may be coalesced aggressively.
+    if (!isFP(dst) && isa<LiOp>(src)) {
+      builder.create<LiOp>({ RDC(dst), new IntAttr(V(src)) });
+      op->erase();
+      return false;
+    }
+    if (!isFP(dst) && isa<LaOp>(src)) {
+      builder.create<LaOp>({ RDC(dst), new NameAttr(NAME(src)) });
+      op->erase();
+      return false;
+    }
+
     CREATE_MV(isFP(REG(op)), REG(op), getReg(op->DEF(0)));
     auto mv = op->prevOp();
 

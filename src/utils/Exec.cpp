@@ -9,8 +9,10 @@ using namespace sys::exec;
 #define sys_unreachable(x) \
   do { std::cerr << x << "\n"; std::abort(); } while (0)
 
-Interpreter::Interpreter(ModuleOp *module) {
-  if (const char *env = std::getenv("SISY_EXEC_STEP_LIMIT")) {
+Interpreter::Interpreter(ModuleOp *module, size_t explicitStepLimit) {
+  if (explicitStepLimit > 0) {
+    stepLimit = explicitStepLimit;
+  } else if (const char *env = std::getenv("SISY_EXEC_STEP_LIMIT")) {
     long long parsed = atoll(env);
     if (parsed > 0)
       stepLimit = (size_t) parsed;
@@ -101,11 +103,17 @@ bool Interpreter::isAddressValid(intptr_t addr, size_t size) const {
   uintptr_t end = begin + size;
   if (end < begin)
     return false;
+  if (lastValidCached && begin >= lastValidBegin && end <= lastValidEnd)
+    return true;
 
-  auto inRanges = [begin, end](const std::vector<MemoryRange> &ranges) {
+  auto inRanges = [this, begin, end](const std::vector<MemoryRange> &ranges) {
     for (const auto &range : ranges) {
-      if (begin >= range.begin && end <= range.end)
+      if (begin >= range.begin && end <= range.end) {
+        lastValidCached = true;
+        lastValidBegin = range.begin;
+        lastValidEnd = range.end;
         return true;
+      }
     }
     return false;
   };
@@ -114,27 +122,32 @@ bool Interpreter::isAddressValid(intptr_t addr, size_t size) const {
 }
 
 size_t Interpreter::getAccessSize(Op *op, bool isLoad) {
+  auto &cache = isLoad ? loadSizeCache : storeSizeCache;
+  auto it = cache.find(op);
+  if (it != cache.end())
+    return it->second;
+
   if (auto sizeAttr = op->find<SizeAttr>())
-    return sizeAttr->value;
+    return cache[op] = sizeAttr->value;
 
   if (isLoad) {
     if (op->getResultType() == sys::Value::f32)
-      return 4;
+      return cache[op] = 4;
     if (op->getResultType() == sys::Value::i64)
-      return 8;
+      return cache[op] = 8;
     if (op->getResultType() == sys::Value::i128)
-      return 16;
-    return 4;
+      return cache[op] = 16;
+    return cache[op] = 4;
   }
 
   auto defTy = op->DEF(0)->getResultType();
   if (defTy == sys::Value::f32)
-    return 4;
+    return cache[op] = 4;
   if (defTy == sys::Value::i64)
-    return 8;
+    return cache[op] = 8;
   if (defTy == sys::Value::i128)
-    return 16;
-  return 4;
+    return cache[op] = 16;
+  return cache[op] = 4;
 }
 
 // The registers are in fact 64-bit.

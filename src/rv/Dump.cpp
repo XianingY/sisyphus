@@ -1,5 +1,7 @@
 #include <iostream>
 #include <fstream>
+#include <iomanip>
+#include <limits>
 #include <sstream>
 
 #include "RvOps.h"
@@ -12,6 +14,12 @@ using namespace sys::rv;
 
 static std::map<BasicBlock*, int> bbcount;
 static int id = 0;
+
+static std::string floatLiteral(float value) {
+  std::ostringstream oss;
+  oss << std::setprecision(std::numeric_limits<float>::max_digits10) << value;
+  return oss.str();
+}
 
 int getCount(BasicBlock *bb) {
   if (!bbcount.count(bb))
@@ -208,9 +216,9 @@ void Dump::dump(std::ostream &os) {
       }
 
       os << NAME(global) << ":\n";
-      os << "  .float " << fArr->vf[0];
+      os << "  .float " << floatLiteral(fArr->vf[0]);
       for (size_t i = 1; i < size / 4; i++)
-        os << ", " << fArr->vf[i];
+        os << ", " << floatLiteral(fArr->vf[i]);
       os << "\n";
     }
   }

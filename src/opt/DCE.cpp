@@ -69,7 +69,10 @@ bool DCE::isImpure(Op *op) {
     auto name = NAME(op);
     if (isExtern(name))
       return true;
-    return fnMap[name]->has<ImpureAttr>();
+    auto it = fnMap.find(name);
+    if (it == fnMap.end() || !it->second)
+      return true;
+    return it->second->has<ImpureAttr>();
   }
 
   return op->has<ImpureAttr>();

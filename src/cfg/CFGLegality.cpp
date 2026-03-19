@@ -1,5 +1,7 @@
 #include "CFGLegality.h"
 
+#include <algorithm>
+#include <unordered_map>
 #include <set>
 
 namespace sys::cfg {
@@ -49,6 +51,19 @@ bool isLegalCFGKind(OpKind kind) {
   return false;
 }
 
+size_t productDims(const std::vector<int> &dims) {
+  if (dims.empty())
+    return 1;
+  size_t prod = 1;
+  for (int dim : dims)
+    prod *= (size_t) std::max(dim, 1);
+  return prod;
+}
+
+bool isArrayLike(const SymbolInfo &sym) {
+  return !sym.dims.empty() || sym.type == hir::TypeKind::Array || sym.type == hir::TypeKind::Pointer;
+}
+
 bool visitHIR(const hir::Op *op, std::vector<std::string> &errors) {
   if (!op)
     return true;
@@ -80,6 +95,35 @@ bool verifyCFGLegalSet(const Module &module, std::vector<std::string> &errors) {
       errors.push_back("cfg legality: unnamed global symbol");
       ok = false;
     }
+    if (!global.intArrayInit.empty() && !global.floatArrayInit.empty()) {
+      errors.push_back("cfg legality: mixed int/float array init for global " + global.name);
+      ok = false;
+    }
+    if (!global.intArrayInit.empty() || !global.floatArrayInit.empty()) {
+      size_t expected = productDims(global.dims);
+      if (expected == 0)
+        expected = 1;
+      if (!global.intArrayInit.empty()) {
+        if (global.elementType == hir::TypeKind::Float) {
+          errors.push_back("cfg legality: int array init used on float global " + global.name);
+          ok = false;
+        }
+        if (global.intArrayInit.size() != expected) {
+          errors.push_back("cfg legality: global array init size mismatch for " + global.name);
+          ok = false;
+        }
+      }
+      if (!global.floatArrayInit.empty()) {
+        if (global.elementType != hir::TypeKind::Float) {
+          errors.push_back("cfg legality: float array init used on non-float global " + global.name);
+          ok = false;
+        }
+        if (global.floatArrayInit.size() != expected) {
+          errors.push_back("cfg legality: global array init size mismatch for " + global.name);
+          ok = false;
+        }
+      }
+    }
   }
   if (module.funcs.empty()) {
     errors.push_back("cfg legality: no function");
@@ -87,6 +131,14 @@ bool verifyCFGLegalSet(const Module &module, std::vector<std::string> &errors) {
   }
 
   for (const auto &func : module.funcs) {
+    std::unordered_map<std::string, SymbolInfo> symbols;
+    for (const auto &sym : module.globals)
+      symbols[sym.name] = sym;
+    for (const auto &sym : func.params)
+      symbols[sym.name] = sym;
+    for (const auto &sym : func.locals)
+      symbols[sym.name] = sym;
+
     if (func.name.empty()) {
       errors.push_back("cfg legality: unnamed function");
       ok = false;
@@ -96,6 +148,45 @@ bool verifyCFGLegalSet(const Module &module, std::vector<std::string> &errors) {
         if (!isLegalCFGKind(inst.kind)) {
           errors.push_back("cfg legality: illegal inst kind in func @" + func.name);
           ok = false;
+        }
+        if (inst.kind == OpKind::Load || inst.kind == OpKind::Store) {
+          if (inst.symbol.empty()) {
+            errors.push_back("cfg legality: empty memory symbol in func @" + func.name);
+            ok = false;
+            continue;
+          }
+          auto it = symbols.find(inst.symbol);
+          if (it == symbols.end()) {
+            errors.push_back("cfg legality: unresolved memory symbol '" + inst.symbol + "' in func @" + func.name);
+            ok = false;
+            continue;
+          }
+
+          bool indexed = inst.kind == OpKind::Load ? !inst.args.empty() : inst.args.size() > 1;
+          if (indexed && isArrayLike(it->second)) {
+            size_t indexCount = inst.kind == OpKind::Load ? inst.args.size() : inst.args.size() - 1;
+            if (!it->second.dims.empty() && indexCount > it->second.dims.size()) {
+              errors.push_back("cfg legality: too many indices for '" + inst.symbol + "' in func @" + func.name);
+              ok = false;
+            }
+            // Loads may represent sub-array address materialization when the
+            // index chain is partial. Stores are always element writes in our
+            // lowering (including flattened array init), so keep element type.
+            bool partialLoad = inst.kind == OpKind::Load &&
+                               !it->second.dims.empty() &&
+                               indexCount < it->second.dims.size();
+            hir::TypeKind expectedType = partialLoad ? hir::TypeKind::Pointer : it->second.elementType;
+            size_t expectedSize = partialLoad ? 8 : (it->second.elemSize ? it->second.elemSize : 4);
+
+            if (inst.type != hir::TypeKind::Unknown && inst.type != expectedType) {
+              errors.push_back("cfg legality: indexed memory type mismatch for '" + inst.symbol + "' in func @" + func.name);
+              ok = false;
+            }
+            if (expectedSize && inst.memSize && inst.memSize != expectedSize) {
+              errors.push_back("cfg legality: indexed memory size mismatch for '" + inst.symbol + "' in func @" + func.name);
+              ok = false;
+            }
+          }
         }
       }
     }

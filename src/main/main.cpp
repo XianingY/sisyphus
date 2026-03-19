@@ -19,6 +19,7 @@
 #include "../hir/HIRVerifier.h"
 #include "../hir/HIRCanonicalize.h"
 #include "../pass/PassRegistry.h"
+#include "../codegen/Ops.h"
 #include "../utils/smt/SMT.h"
 
 using namespace smt;
@@ -266,19 +267,6 @@ int main(int argc, char **argv) {
       if (!op)
         continue;
 
-      if (op->kind == sys::hir::OpKind::VarDecl) {
-        if (auto *var = sys::dyn_cast<sys::VarDeclNode>(op->origin)) {
-          bool arrayInit = var->init && (sys::isa<sys::ConstArrayNode>(var->init) || sys::isa<sys::LocalArrayNode>(var->init));
-          if (arrayInit && seen.insert("array_init").second)
-            reasons.push_back("array_init");
-        }
-      }
-
-      if ((op->kind == sys::hir::OpKind::Load || op->kind == sys::hir::OpKind::Store) &&
-          (op->type == sys::hir::TypeKind::Array || op->type == sys::hir::TypeKind::Pointer) &&
-          seen.insert("ptr_array_memory").second)
-        reasons.push_back("ptr_array_memory");
-
       for (const auto &child : op->children)
         if (child)
           stack.push_back(child.get());
@@ -402,6 +390,45 @@ int main(int argc, char **argv) {
   delete node;
 
   sys::ModuleOp *module = cg ? cg->getModule() : loweredModule.get();
+  sys::pipeline::PipelineMetrics metrics;
+  if (module) {
+    std::function<void(sys::Region*, int)> walkRegion;
+    std::function<void(sys::Op*, int)> walkOp;
+
+    walkOp = [&](sys::Op *op, int loopDepth) {
+      if (!op)
+        return;
+      metrics.moduleOpCount++;
+      int nestedDepth = loopDepth +
+                        ((sys::isa<sys::ForOp>(op) || sys::isa<sys::WhileOp>(op)) ? 1 : 0);
+      if (nestedDepth > metrics.maxLoopDepth)
+        metrics.maxLoopDepth = nestedDepth;
+      for (auto *region : op->getRegions())
+        walkRegion(region, nestedDepth);
+    };
+
+    walkRegion = [&](sys::Region *region, int loopDepth) {
+      if (!region)
+        return;
+      for (auto *bb : region->getBlocks()) {
+        if (!bb)
+          continue;
+        for (auto *op : bb->getOps()) {
+          if (bb->getOpCount() > 0 && op == bb->getLastOp()) {
+            if (sys::isa<sys::BranchOp>(op))
+              metrics.cfgEdgeCount += 2;
+            else if (sys::isa<sys::GotoOp>(op))
+              metrics.cfgEdgeCount += 1;
+          }
+          walkOp(op, loopDepth);
+        }
+      }
+    };
+
+    for (auto *func : module->findAll<sys::FuncOp>())
+      walkRegion(func->getRegion(), 0);
+  }
+
   if (opts.dumpMidIR) {
     if (opts.emitIR)
       std::cerr << "===== Initial IR =====\n";
@@ -409,7 +436,7 @@ int main(int argc, char **argv) {
   }
 
   sys::PassManager pm(module, opts);
-  auto plan = sys::pipeline::configurePipeline(pm, opts);
+  auto plan = sys::pipeline::configurePipeline(pm, opts, metrics);
   if (const char *env = std::getenv("SISY_DUMP_PIPELINE_PROFILE")) {
     if (env[0] && std::strcmp(env, "0") != 0) {
       std::cerr << "[pipeline] " << sys::pipeline::formatPlan(plan) << "\n";

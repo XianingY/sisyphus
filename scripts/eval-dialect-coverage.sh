@@ -88,6 +88,33 @@ calc_quantile_ms() {
     '
 }
 
+summarize_cluster() {
+  local mode="$1"
+  local cluster="$2"
+  local pattern="$3"
+  local csv="${OUT_DIR}/${mode}.csv"
+
+  awk -F, -v mode="${mode}" -v cluster="${cluster}" -v pattern="${pattern}" '
+BEGIN {
+  total=0; ok=0; mismatch=0; timeout=0; compile_fail=0; compile_crash=0; link_fail=0;
+}
+NR == 1 { next }
+$2 ~ pattern {
+  total++;
+  if ($6 == "ok") ok++;
+  else if ($6 == "mismatch") mismatch++;
+  else if ($6 == "timeout") timeout++;
+  else if ($6 == "compile_fail") compile_fail++;
+  else if ($6 == "compile_crash") compile_crash++;
+  else if ($6 == "link_fail") link_fail++;
+}
+END {
+  printf "%s,%s,%d,%d,%d,%d,%d,%d,%d\n",
+    mode, cluster, total, ok, mismatch, timeout, compile_fail, compile_crash, link_fail;
+}
+' "${csv}" >>"${OUT_DIR}/cluster-summary.csv"
+}
+
 summarize_mode() {
   local mode="$1"
   local csv="${OUT_DIR}/${mode}.csv"
@@ -177,9 +204,14 @@ printf 'mode,suite,target,opt,total,pass,fail,timeout_count,mismatch_count,compi
 printf 'mode,frontend_path,count\n' >"${OUT_DIR}/frontend-path.csv"
 printf 'mode,fallback_reason,count\n' >"${OUT_DIR}/fallback-reasons.csv"
 printf 'mode,fallback_reason,case_id,count\n' >"${OUT_DIR}/fallback-hotspots.csv"
+printf 'mode,cluster,total,ok,mismatch,timeout,compile_fail,compile_crash,link_fail\n' >"${OUT_DIR}/cluster-summary.csv"
 
 summarize_mode "default"
 summarize_mode "forced-dialect"
+summarize_cluster "default" "ptr_array_cluster" "(04_arr_defn3|05_arr_defn4|61_sort_test7|62_percolation|64_calculator|84_long_array2|88_many_params2|22_matrix_multiply|24_array_only|30_many_dimensions)"
+summarize_cluster "forced-dialect" "ptr_array_cluster" "(04_arr_defn3|05_arr_defn4|61_sort_test7|62_percolation|64_calculator|84_long_array2|88_many_params2|22_matrix_multiply|24_array_only|30_many_dimensions)"
+summarize_cluster "default" "short_circuit_cluster" "(50_short_circuit|51_short_circuit3|78_side_effect|28_side_effect2)"
+summarize_cluster "forced-dialect" "short_circuit_cluster" "(50_short_circuit|51_short_circuit3|78_side_effect|28_side_effect2)"
 
 default_pass="$(awk -F, '$1 == "default" { print $6; exit }' "${OUT_DIR}/summary.csv")"
 forced_pass="$(awk -F, '$1 == "forced-dialect" { print $6; exit }' "${OUT_DIR}/summary.csv")"
@@ -197,4 +229,5 @@ echo "summary: ${OUT_DIR}/summary.csv"
 echo "frontend path: ${OUT_DIR}/frontend-path.csv"
 echo "fallback reasons: ${OUT_DIR}/fallback-reasons.csv"
 echo "fallback hotspots: ${OUT_DIR}/fallback-hotspots.csv"
+echo "cluster summary: ${OUT_DIR}/cluster-summary.csv"
 echo "delta: ${OUT_DIR}/delta.csv"

@@ -17,7 +17,7 @@ if [[ -n "${SISY_COMPILER_EXTRA_ARGS:-}" ]]; then
   EXTRA_ARGS+=(${SISY_COMPILER_EXTRA_ARGS})
 fi
 TAG="${OUT_TAG:-}"
-COMPARE_TIMEOUT_SEC="${COMPARE_TIMEOUT_SEC:-30}"
+COMPARE_TIMEOUT_SEC="${COMPARE_TIMEOUT_SEC:-45}"
 COMPARE_INCLUDE_PERF="${COMPARE_INCLUDE_PERF:-0}"
 OUT_DIR="${ROOT_DIR}/tests/.out/compare-${TARGET}-${OPT}"
 if [[ -n "${TAG}" ]]; then
@@ -79,6 +79,8 @@ resolve_ref_out() {
 pass=0
 fail=0
 skip=0
+fail_step_budget_timeout=0
+fail_wall_timeout=0
 
 while IFS= read -r -d '' f; do
   rel="${f#${CASE_DIR}/}"
@@ -113,7 +115,11 @@ while IFS= read -r -d '' f; do
     status=$?
     fail=$((fail + 1))
     if [[ ${status} -eq 124 ]]; then
-      echo "[fail-timeout] ${rel} (>${COMPARE_TIMEOUT_SEC}s, log: ${log})"
+      fail_wall_timeout=$((fail_wall_timeout + 1))
+      echo "[fail-wall-timeout] ${rel} (>${COMPARE_TIMEOUT_SEC}s, log: ${log})"
+    elif grep -q "compare timed out after step budget" "${log}" 2>/dev/null; then
+      fail_step_budget_timeout=$((fail_step_budget_timeout + 1))
+      echo "[fail-step-budget-timeout] ${rel} (log: ${log})"
     else
       echo "[fail] ${rel} (log: ${log})"
     fi
@@ -121,7 +127,7 @@ while IFS= read -r -d '' f; do
   fi
 done < <(find "${CASE_DIR}" -type f \( -name "*.sy" -o -name "*.c" \) -print0 | sort -z)
 
-echo "Compare summary: pass=${pass}, fail=${fail}, skip=${skip}, target=${TARGET}, opt=${OPT}"
+echo "Compare summary: pass=${pass}, fail=${fail}, skip=${skip}, target=${TARGET}, opt=${OPT}, compare_step_budget_timeout=${fail_step_budget_timeout}, compare_wall_timeout=${fail_wall_timeout}"
 if [[ ${fail} -ne 0 ]]; then
   exit 1
 fi

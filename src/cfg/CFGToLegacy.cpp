@@ -276,6 +276,10 @@ private:
       argTy = Value::i64;
 
     auto arg = builder.create<GetArgOp>(argTy, { new IntAttr(index) });
+    // Keep argument position information stable for backend ABI lowering.
+    // If unused getarg ops are dropped early, stack-arg offset mapping for
+    // mixed/large signatures can become ambiguous.
+    arg->add<ImpureAttr>();
     SymbolState sym;
     sym.info = param;
 
@@ -416,6 +420,37 @@ private:
     return builder.create<IntOp>({ new IntAttr(0) });
   }
 
+  void setBeforeTerminatorIfPresent(FunctionState &st, int bid) {
+    auto *bb = st.blocks[bid];
+    if (!bb || bb->getOpCount() == 0) {
+      builder.setToBlockEnd(st.blocks[bid]);
+      return;
+    }
+    auto *term = bb->getLastOp();
+    if (isa<GotoOp>(term) || isa<BranchOp>(term) || isa<ReturnOp>(term)) {
+      builder.setBeforeOp(term);
+      return;
+    }
+    builder.setToBlockEnd(st.blocks[bid]);
+  }
+
+  Value materializeImmediateBeforeTerminator(FunctionState &st, int bid, const std::string &token,
+                                             hir::TypeKind expectedType) {
+    setBeforeTerminatorIfPresent(st, bid);
+
+    long long iv = 0;
+    if (parseIntToken(token, iv))
+      return builder.create<IntOp>({ new IntAttr((int) iv) });
+
+    float fv = 0.0f;
+    if (parseFloatToken(token, fv))
+      return builder.create<FloatOp>({ new FloatAttr(fv) });
+
+    if (expectedType == hir::TypeKind::Float)
+      return builder.create<FloatOp>({ new FloatAttr(0.0f) });
+    return builder.create<IntOp>({ new IntAttr(0) });
+  }
+
   Value resolveToken(FunctionState &st, int bid, const std::string &token, hir::TypeKind expectedType, bool allowEdgePlaceholder) {
     if (token.empty()) {
       addError("empty value token in @" + st.cfgFunc->name);
@@ -461,6 +496,10 @@ private:
   }
 
   Value symbolBaseAddress(FunctionState &st, int bid, const std::string &name, hir::TypeKind fallbackType) {
+    // Function-local symbols must shadow globals with the same name.
+    if (st.symbols.count(name))
+      return localAddress(st, bid, name, fallbackType);
+
     auto git = globals.find(name);
     if (git != globals.end()) {
       builder.setToBlockEnd(st.blocks[bid]);
@@ -470,7 +509,8 @@ private:
   }
 
   Value buildIndexedAddress(FunctionState &st, int bid, const SymbolInfo &info, Value base,
-                            const std::vector<std::string> &indices) {
+                            const std::vector<std::string> &indices,
+                            bool linearizedScalarIndex = false) {
     if (indices.empty())
       return base;
 
@@ -479,7 +519,7 @@ private:
       elemSize = 4;
 
     std::vector<size_t> strides(indices.size(), elemSize);
-    if (!info.dims.empty()) {
+    if (!info.dims.empty() && !(linearizedScalarIndex && indices.size() == 1)) {
       for (size_t i = 0; i < indices.size(); i++) {
         size_t stride = elemSize;
         for (size_t j = i + 1; j < info.dims.size(); j++)
@@ -640,11 +680,19 @@ private:
     std::vector<std::string> indices = inst.args;
 
     Value out;
-    if (indices.empty() && isArrayLike(sym) && (inst.type == hir::TypeKind::Pointer || inst.type == hir::TypeKind::Array)) {
-      out = base;
+    bool pointerResult = inst.type == hir::TypeKind::Pointer || inst.type == hir::TypeKind::Array;
+    if (pointerResult && isArrayLike(sym)) {
+      if (indices.empty())
+        out = base;
+      else
+        out = buildIndexedAddress(st, bid, sym, base, indices);
     } else {
       bool indexed = !indices.empty();
-      auto addr = buildIndexedAddress(st, bid, sym, base, indices);
+      const bool linearizedScalarIndex =
+        indexed && indices.size() == 1 && sym.dims.size() > 1 &&
+        inst.type == sym.elementType &&
+        (inst.memSize == 0 || inst.memSize == (sym.elemSize ? sym.elemSize : defaultSize(sym.elementType)));
+      auto addr = buildIndexedAddress(st, bid, sym, base, indices, linearizedScalarIndex);
       auto ty = indexed ? toValueType(sym.elementType) : toValueType(inst.type);
       if (ty == Value::i128)
         ty = Value::i32;
@@ -677,7 +725,10 @@ private:
 
     auto base = symbolBaseAddress(st, bid, inst.symbol, inst.type);
     bool indexed = !indices.empty();
-    auto addr = indexed ? buildIndexedAddress(st, bid, sym, base, indices) : base;
+    const bool linearizedScalarIndex =
+      indexed && indices.size() == 1 && sym.dims.size() > 1 &&
+      (inst.memSize == 0 || inst.memSize == (sym.elemSize ? sym.elemSize : defaultSize(sym.elementType)));
+    auto addr = indexed ? buildIndexedAddress(st, bid, sym, base, indices, linearizedScalarIndex) : base;
 
     size_t sz = loadStoreSize(inst, sym, indexed);
     if (!sz)
@@ -706,6 +757,10 @@ private:
     auto *call = builder.create<CallOp>(retTy, callArgs, {
       new NameAttr(normalizeCallee(inst.symbol))
     });
+    // Dialect frontend does not run the legacy pureness inference stage.
+    // Be conservative: treat calls as impure to avoid invalid CSE/hoisting
+    // across side-effect boundaries (e.g. getint/putint and user calls).
+    call->add<ImpureAttr>();
 
     if (!inst.result.empty())
       st.values[inst.result] = call;
@@ -852,10 +907,14 @@ private:
           auto at = token.find('@');
           std::string symbol = (at == std::string::npos) ? token.substr(1) : token.substr(1, at - 1);
           value = ensureEdgeSymbolLoad(st, pred, symbol, inst.type);
+        } else if (!token.empty() && (token[0] == '#' || token.rfind("f#", 0) == 0)) {
+          // Phi incoming constants must be inserted before predecessor
+          // terminators; placing them at block end creates unreachable defs.
+          value = materializeImmediateBeforeTerminator(st, pred, token, inst.type);
         } else {
           value = resolveToken(st, pred, token, inst.type, true);
           if (!value.defining)
-            value = materializeImmediate(st, pred, "#0", inst.type);
+            value = materializeImmediateBeforeTerminator(st, pred, "#0", inst.type);
         }
 
         incoming.push_back(value);

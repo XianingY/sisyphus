@@ -1,6 +1,7 @@
 #ifndef PIPELINE_PROFILES_H
 #define PIPELINE_PROFILES_H
 
+#include <cstddef>
 #include <string>
 
 #include "Options.h"
@@ -19,6 +20,12 @@ enum class FrontendProfile {
   Dialect,
 };
 
+struct PipelineMetrics {
+  size_t moduleOpCount = 0;
+  size_t cfgEdgeCount = 0;
+  int maxLoopDepth = 0;
+};
+
 struct PipelinePlan {
   FrontendProfile frontendProfile;
   CoreProfile coreProfile;
@@ -26,12 +33,14 @@ struct PipelinePlan {
   bool enableO2Experimental;
   bool enableO2Heavy;
   int o2LoopRounds;
+  bool largeModuleMode;
+  PipelineMetrics metrics;
   bool useArmBackend;
   bool useRvBackend;
 };
 
-PipelinePlan selectPlan(const Options &opts);
-PipelinePlan configurePipeline(PassManager &pm, const Options &opts);
+PipelinePlan selectPlan(const Options &opts, PipelineMetrics metrics = {});
+PipelinePlan configurePipeline(PassManager &pm, const Options &opts, PipelineMetrics metrics = {});
 std::string formatPlan(const PipelinePlan &plan);
 
 }

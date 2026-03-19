@@ -1,13 +1,18 @@
 #include "HIRToCFG.h"
 
 #include <algorithm>
+#include <functional>
+#include <iomanip>
+#include <limits>
 #include <numeric>
 #include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
+#include "../hir/HIRBuilder.h"
 #include "../utils/DynamicCast.h"
 
 namespace sys::cfg {
@@ -66,6 +71,16 @@ size_t typeSize(Type *ty) {
 std::vector<int> typeDims(Type *ty) {
   if (auto arr = dyn_cast<ArrayType>(ty))
     return arr->dims;
+  if (auto ptr = dyn_cast<PointerType>(ty)) {
+    if (auto arr = dyn_cast<ArrayType>(ptr->pointee)) {
+      // Parameter arrays like int a[][N][M] are represented as pointer-to-array.
+      // Keep an unknown leading dimension so stride of the first index uses
+      // known trailing dims (N, M, ...).
+      std::vector<int> dims = arr->dims;
+      dims.insert(dims.begin(), 0);
+      return dims;
+    }
+  }
   return {};
 }
 
@@ -91,37 +106,10 @@ SymbolInfo buildSymbolInfo(const std::string &name, Type *ty, bool isGlobal, boo
 
 std::string formatFloat(double value) {
   std::ostringstream oss;
-  oss << value;
+  // Preserve enough decimal digits to round-trip through strtof() in
+  // CFG->legacy lowering without introducing avoidable ULP drift.
+  oss << std::setprecision(std::numeric_limits<float>::max_digits10) << value;
   return oss.str();
-}
-
-bool literalToken(ASTNode *node, std::string &token) {
-  if (!node)
-    return false;
-  if (auto x = dyn_cast<IntNode>(node)) {
-    token = "#" + std::to_string(x->value);
-    return true;
-  }
-  if (auto x = dyn_cast<FloatNode>(node)) {
-    token = "f#" + formatFloat(x->value);
-    return true;
-  }
-  if (auto u = dyn_cast<UnaryNode>(node)) {
-    if (u->kind == UnaryNode::Minus) {
-      std::string inner;
-      if (!literalToken(u->node, inner))
-        return false;
-      if (inner.rfind("f#", 0) == 0) {
-        token = "f#-" + inner.substr(2);
-        return true;
-      }
-      if (inner.rfind("#", 0) == 0) {
-        token = "#-" + inner.substr(1);
-        return true;
-      }
-    }
-  }
-  return false;
 }
 
 struct FuncLoweringState {
@@ -132,6 +120,9 @@ struct FuncLoweringState {
 class Lowerer {
   const hir::Module &hirModule;
   std::vector<std::string> &errors;
+  std::unordered_map<const hir::Op*, std::string> resolvedSymbols;
+  std::unordered_map<std::string, int> declCounts;
+  std::unordered_set<std::string> globalSymbols;
 
 public:
   explicit Lowerer(const hir::Module &hirModule, std::vector<std::string> &errors):
@@ -162,6 +153,120 @@ public:
   }
 
 private:
+  std::string getResolvedSymbol(const hir::Op *op) const {
+    if (!op)
+      return "";
+    auto it = resolvedSymbols.find(op);
+    if (it != resolvedSymbols.end())
+      return it->second;
+    return op->symbol;
+  }
+
+  void resolveSymbolsRec(const hir::Op *op,
+                         std::vector<std::unordered_map<std::string, std::string>> &scopes,
+                         std::unordered_map<std::string, int> &counters) {
+    if (!op)
+      return;
+
+    bool pushed = false;
+    bool lexicalBlock = false;
+    if (op->kind == hir::OpKind::Block) {
+      // TransparentBlockNode is frequently used as a declaration wrapper
+      // (e.g. `int a = ...;`) and should not create a nested lexical scope
+      // by itself. But mixed-content transparent blocks do represent real
+      // statement scopes and must isolate shadowed symbols.
+      bool transparent = op->origin && isa<TransparentBlockNode>(op->origin);
+      if (!transparent) {
+        lexicalBlock = true;
+      } else {
+        bool declWrapper = !op->children.empty();
+        for (const auto &child : op->children) {
+          if (!child || child->kind != hir::OpKind::VarDecl) {
+            declWrapper = false;
+            break;
+          }
+        }
+        lexicalBlock = !declWrapper;
+      }
+    }
+    if (lexicalBlock || op->kind == hir::OpKind::For) {
+      scopes.emplace_back();
+      pushed = true;
+    }
+
+    if (op->kind == hir::OpKind::VarDecl && !op->symbol.empty()) {
+      bool collides = globalSymbols.count(op->symbol) > 0;
+      for (auto it = scopes.rbegin(); !collides && it != scopes.rend(); ++it)
+        collides = it->count(op->symbol) > 0;
+      bool needRename = declCounts[op->symbol] > 1 || collides;
+      std::string renamed = op->symbol;
+      if (needRename) {
+        int id = counters[op->symbol]++;
+        renamed = op->symbol + "$" + std::to_string(id);
+      }
+      scopes.back()[op->symbol] = renamed;
+      resolvedSymbols[op] = renamed;
+    } else if ((op->kind == hir::OpKind::Load || op->kind == hir::OpKind::Store) && !op->symbol.empty()) {
+      std::string resolved = op->symbol;
+      for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+        auto found = it->find(op->symbol);
+        if (found != it->end()) {
+          resolved = found->second;
+          break;
+        }
+      }
+      resolvedSymbols[op] = resolved;
+    }
+
+    for (const auto &child : op->children)
+      resolveSymbolsRec(child.get(), scopes, counters);
+
+    if (pushed)
+      scopes.pop_back();
+  }
+
+  void countVarDecls(const hir::Op *op) {
+    if (!op)
+      return;
+    if (op->kind == hir::OpKind::VarDecl && !op->symbol.empty())
+      declCounts[op->symbol]++;
+    for (const auto &child : op->children)
+      countVarDecls(child.get());
+  }
+
+  void buildResolvedSymbols(const hir::Op &funcOp) {
+    resolvedSymbols.clear();
+    declCounts.clear();
+    globalSymbols.clear();
+    std::vector<std::unordered_map<std::string, std::string>> scopes;
+    scopes.emplace_back();
+    std::unordered_map<std::string, int> counters;
+
+    if (hirModule.root) {
+      std::function<void(const hir::Op*)> collectGlobalsRec = [&](const hir::Op *node) {
+        if (!node)
+          return;
+        if (node->kind == hir::OpKind::Func)
+          return;
+        if (node->kind == hir::OpKind::VarDecl && !node->symbol.empty())
+          globalSymbols.insert(node->symbol);
+        for (const auto &child : node->children)
+          collectGlobalsRec(child.get());
+      };
+      collectGlobalsRec(hirModule.root.get());
+    }
+
+    if (!funcOp.children.empty())
+      countVarDecls(funcOp.children[0].get());
+
+    if (auto *fn = dyn_cast<FnDeclNode>(funcOp.origin)) {
+      for (const auto &arg : fn->args)
+        scopes.back()[arg] = arg;
+    }
+    if (!funcOp.children.empty())
+      resolveSymbolsRec(funcOp.children[0].get(), scopes, counters);
+  }
+
   static bool isTerminated(const Func &func, int bid) {
     if (bid < 0 || bid >= (int) func.blocks.size())
       return true;
@@ -169,6 +274,30 @@ private:
     if (insts.empty())
       return false;
     return isTerminator(insts.back().kind);
+  }
+
+  static void normalizePhiOrder(Func &func) {
+    for (auto &bb : func.blocks) {
+      if (bb.insts.empty())
+        continue;
+      std::vector<Inst> phis;
+      std::vector<Inst> rest;
+      phis.reserve(bb.insts.size());
+      rest.reserve(bb.insts.size());
+      for (auto &inst : bb.insts) {
+        if (inst.kind == OpKind::Phi)
+          phis.push_back(std::move(inst));
+        else
+          rest.push_back(std::move(inst));
+      }
+      std::vector<Inst> merged;
+      merged.reserve(phis.size() + rest.size());
+      for (auto &inst : phis)
+        merged.push_back(std::move(inst));
+      for (auto &inst : rest)
+        merged.push_back(std::move(inst));
+      bb.insts.swap(merged);
+    }
   }
 
   static hir::TypeKind inferExprType(const hir::Op *op) {
@@ -242,44 +371,54 @@ private:
   }
 
   void collectGlobals(const hir::Op &root, Module &cfgModule) {
-    for (const auto &child : root.children) {
-      if (!child || child->kind != hir::OpKind::VarDecl)
-        continue;
-      const auto *origin = dyn_cast<VarDeclNode>(child->origin);
-      Type *ty = origin ? origin->type : child->origin ? child->origin->type : nullptr;
-      auto info = buildSymbolInfo(child->symbol, ty, true, false, origin ? origin->mut : true);
+    std::unordered_set<std::string> seen;
+    std::function<void(const hir::Op*)> visit = [&](const hir::Op *op) {
+      if (!op)
+        return;
+      if (op->kind == hir::OpKind::Func)
+        return;
+      if (op->kind == hir::OpKind::VarDecl && !op->symbol.empty() && !seen.count(op->symbol)) {
+        const auto *origin = dyn_cast<VarDeclNode>(op->origin);
+        Type *ty = origin ? origin->type : op->origin ? op->origin->type : nullptr;
+        auto info = buildSymbolInfo(op->symbol, ty, true, false, origin ? origin->mut : true);
 
-      if (origin && origin->init) {
-        if (auto i = dyn_cast<IntNode>(origin->init)) {
-          info.hasIntInit = true;
-          info.intInit = i->value;
-        } else if (auto f = dyn_cast<FloatNode>(origin->init)) {
-          info.hasFloatInit = true;
-          info.floatInit = f->value;
-        } else if (auto arr = dyn_cast<ConstArrayNode>(origin->init)) {
-          size_t elems = productDims(info.dims);
-          if (elems == 0)
-            elems = 1;
-          if (arr->isFloat) {
-            info.floatArrayInit.assign(arr->vf, arr->vf + elems);
-          } else {
-            info.intArrayInit.assign(arr->vi, arr->vi + elems);
+        if (origin && origin->init) {
+          if (auto i = dyn_cast<IntNode>(origin->init)) {
+            info.hasIntInit = true;
+            info.intInit = i->value;
+          } else if (auto f = dyn_cast<FloatNode>(origin->init)) {
+            info.hasFloatInit = true;
+            info.floatInit = f->value;
+          } else if (auto arr = dyn_cast<ConstArrayNode>(origin->init)) {
+            size_t elems = productDims(info.dims);
+            if (elems == 0)
+              elems = 1;
+            if (arr->isFloat) {
+              info.floatArrayInit.assign(arr->vf, arr->vf + elems);
+            } else {
+              info.intArrayInit.assign(arr->vi, arr->vi + elems);
+            }
           }
         }
+        seen.insert(op->symbol);
+        cfgModule.globals.push_back(std::move(info));
       }
+      for (const auto &child : op->children)
+        visit(child.get());
+    };
 
-      cfgModule.globals.push_back(std::move(info));
-    }
+    visit(&root);
   }
 
-  static void collectLocalsRec(const hir::Op *op, std::vector<SymbolInfo> &locals, std::unordered_set<std::string> &seen) {
+  void collectLocalsRec(const hir::Op *op, std::vector<SymbolInfo> &locals, std::unordered_set<std::string> &seen) {
     if (!op)
       return;
-    if (op->kind == hir::OpKind::VarDecl && !op->symbol.empty() && !seen.count(op->symbol)) {
+    std::string sym = getResolvedSymbol(op);
+    if (op->kind == hir::OpKind::VarDecl && !sym.empty() && !seen.count(sym)) {
       const auto *origin = dyn_cast<VarDeclNode>(op->origin);
       Type *ty = origin ? origin->type : op->origin ? op->origin->type : nullptr;
-      locals.push_back(buildSymbolInfo(op->symbol, ty, false, false, origin ? origin->mut : true));
-      seen.insert(op->symbol);
+      locals.push_back(buildSymbolInfo(sym, ty, false, false, origin ? origin->mut : true));
+      seen.insert(sym);
     }
     for (const auto &child : op->children)
       collectLocalsRec(child.get(), locals, seen);
@@ -303,14 +442,20 @@ private:
       Inst inst;
       inst.kind = OpKind::Load;
       inst.type = op->type;
-      inst.symbol = op->symbol;
-      auto it = symbols.find(op->symbol);
+      inst.symbol = getResolvedSymbol(op);
+      auto it = symbols.find(inst.symbol);
       if (it != symbols.end()) {
         inst.elementType = it->second.elementType;
         bool indexed = !op->children.empty();
         if (indexed) {
-          inst.type = it->second.elementType;
-          inst.memSize = it->second.elemSize;
+          bool partialIndex = !it->second.dims.empty() && op->children.size() < it->second.dims.size();
+          if (partialIndex) {
+            inst.type = hir::TypeKind::Pointer;
+            inst.memSize = 8;
+          } else {
+            inst.type = it->second.elementType;
+            inst.memSize = it->second.elemSize;
+          }
         } else if (it->second.type == hir::TypeKind::Array || it->second.type == hir::TypeKind::Pointer) {
           inst.type = hir::TypeKind::Pointer;
           inst.memSize = 8;
@@ -342,6 +487,47 @@ private:
       return inst.result.empty() ? "#0" : inst.result;
     }
     case hir::OpKind::Arith:
+      if (op->children.size() == 2 && (op->symbol == "&&" || op->symbol == "||")) {
+        bool isAnd = op->symbol == "&&";
+        int rhsId = newBlock(func, st, isAnd ? "sc.and.rhs" : "sc.or.rhs");
+        int shortId = newBlock(func, st, isAnd ? "sc.and.short" : "sc.or.short");
+        int mergeId = newBlock(func, st, isAnd ? "sc.and.merge" : "sc.or.merge");
+
+        auto lhsCond = normalizeCond(op->children[0].get(), func, st, cur, symbols);
+        Inst cbr;
+        cbr.kind = OpKind::CondBr;
+        cbr.args = { lhsCond };
+        cbr.targets = isAnd ? std::vector<int> { rhsId, shortId } : std::vector<int> { shortId, rhsId };
+        emit(func, cur, cbr);
+
+        int rhsEnd = rhsId;
+        auto rhsCond = normalizeCond(op->children[1].get(), func, st, rhsEnd, symbols);
+        if (!isTerminated(func, rhsEnd)) {
+          Inst br;
+          br.kind = OpKind::Br;
+          br.targets.push_back(mergeId);
+          emit(func, rhsEnd, br);
+        }
+
+        if (!isTerminated(func, shortId)) {
+          Inst br;
+          br.kind = OpKind::Br;
+          br.targets.push_back(mergeId);
+          emit(func, shortId, br);
+        }
+
+        Inst phi;
+        phi.kind = OpKind::Phi;
+        phi.type = hir::TypeKind::Int;
+        phi.result = newTemp(st);
+        phi.phiPreds = { rhsEnd, shortId };
+        phi.args = { rhsCond, isAnd ? "#0" : "#1" };
+        emit(func, mergeId, phi);
+
+        cur = mergeId;
+        return phi.result;
+      }
+      [[fallthrough]];
     case hir::OpKind::Cmp: {
       Inst inst;
       inst.kind = (op->kind == hir::OpKind::Cmp) ? OpKind::Cmp : OpKind::Arith;
@@ -366,6 +552,25 @@ private:
     return "#0";
   }
 
+  static std::string defaultToken(hir::TypeKind type) {
+    return type == hir::TypeKind::Float ? "f#0.0" : "#0";
+  }
+
+  std::string lowerASTExpr(ASTNode *node, hir::TypeKind fallbackType, Func &func,
+                           FuncLoweringState &st, int &cur,
+                           const std::unordered_map<std::string, SymbolInfo> &symbols) {
+    if (!node)
+      return defaultToken(fallbackType);
+
+    hir::Builder builder;
+    auto exprModule = builder.build(node);
+    if (!exprModule.root || exprModule.root->children.empty() || !exprModule.root->children[0]) {
+      errors.push_back("hir->cfg: cannot lower array init expression");
+      return defaultToken(fallbackType);
+    }
+    return lowerExpr(exprModule.root->children[0].get(), func, st, cur, symbols);
+  }
+
   std::string normalizeCond(const hir::Op *cond, Func &func, FuncLoweringState &st, int &cur,
                             const std::unordered_map<std::string, SymbolInfo> &symbols) {
     auto value = lowerExpr(cond, func, st, cur, symbols);
@@ -384,7 +589,42 @@ private:
     return cmp.result;
   }
 
-  void emitLocalArrayInit(const hir::Op *op, const VarDeclNode *var, Func &func, int cur,
+  void emitCondBranch(const hir::Op *cond, Func &func, FuncLoweringState &st, int cur,
+                      const std::unordered_map<std::string, SymbolInfo> &symbols,
+                      int trueTarget, int falseTarget) {
+    if (!cond) {
+      Inst br;
+      br.kind = OpKind::Br;
+      br.targets.push_back(falseTarget);
+      emit(func, cur, br);
+      return;
+    }
+
+    if (cond->kind == hir::OpKind::Arith && cond->children.size() == 2) {
+      if (cond->symbol == "&&") {
+        int rhsId = newBlock(func, st, "sc.and.rhs");
+        emitCondBranch(cond->children[0].get(), func, st, cur, symbols, rhsId, falseTarget);
+        emitCondBranch(cond->children[1].get(), func, st, rhsId, symbols, trueTarget, falseTarget);
+        return;
+      }
+      if (cond->symbol == "||") {
+        int rhsId = newBlock(func, st, "sc.or.rhs");
+        emitCondBranch(cond->children[0].get(), func, st, cur, symbols, trueTarget, rhsId);
+        emitCondBranch(cond->children[1].get(), func, st, rhsId, symbols, trueTarget, falseTarget);
+        return;
+      }
+    }
+
+    int at = cur;
+    auto condVal = normalizeCond(cond, func, st, at, symbols);
+    Inst cbr;
+    cbr.kind = OpKind::CondBr;
+    cbr.args.push_back(condVal);
+    cbr.targets = { trueTarget, falseTarget };
+    emit(func, at, cbr);
+  }
+
+  void emitLocalArrayInit(const std::string &symbol, const VarDeclNode *var, Func &func, FuncLoweringState &st, int &cur,
                           const std::unordered_map<std::string, SymbolInfo> &symbols,
                           std::set<std::string> *stores) {
     if (!var || !var->init)
@@ -394,28 +634,111 @@ private:
     if (!local || !arrTy)
       return;
 
-    size_t arrSize = std::max(1, arrTy->getSize());
-    for (size_t i = 0; i < arrSize; i++) {
-      std::string token;
-      ASTNode *elem = local->va[i];
-      if (!literalToken(elem, token)) {
-        // Keep lowering robust on non-literal array initializers.
-        token = (arrTy->base && isa<FloatType>(arrTy->base)) ? "f#0.0" : "#0";
+    auto it = symbols.find(symbol);
+    if (it == symbols.end()) {
+      errors.push_back("hir->cfg: local array init symbol not found: " + symbol);
+      return;
+    }
+    if (it->second.dims.empty()) {
+      errors.push_back("hir->cfg: local array init target is not array: " + symbol);
+      return;
+    }
+
+    size_t declaredSize = productDims(it->second.dims);
+    size_t astSize = productDims(arrTy->dims);
+    if (declaredSize == 0)
+      declaredSize = 1;
+    if (astSize == 0)
+      astSize = 1;
+    if (declaredSize != astSize) {
+      errors.push_back("hir->cfg: local array init dimension mismatch for " + symbol);
+    }
+
+    size_t elemSize = it->second.elemSize ? it->second.elemSize : 4;
+    if (declaredSize <= 65536) {
+      for (size_t i = 0; i < declaredSize; i++) {
+        Inst zstore;
+        zstore.kind = OpKind::Store;
+        zstore.symbol = symbol;
+        zstore.args = { "#" + std::to_string(i), defaultToken(it->second.elementType) };
+        zstore.type = it->second.elementType;
+        zstore.memSize = elemSize;
+        emit(func, cur, zstore);
       }
+      addStoreSym(stores, symbol);
+    } else {
+      int condId = newBlock(func, st, "arr.init.cond");
+      int bodyId = newBlock(func, st, "arr.init.body");
+      int exitId = newBlock(func, st, "arr.init.exit");
+
+      Inst jump;
+      jump.kind = OpKind::Br;
+      jump.targets.push_back(condId);
+      emit(func, cur, jump);
+
+      std::string idxPhi = newTemp(st);
+      std::string idxNext = newTemp(st);
+
+      Inst phi;
+      phi.kind = OpKind::Phi;
+      phi.type = hir::TypeKind::Int;
+      phi.result = idxPhi;
+      phi.phiPreds = { cur, bodyId };
+      phi.args = { "#0", idxNext };
+      emit(func, condId, phi);
+
+      Inst cmp;
+      cmp.kind = OpKind::Cmp;
+      cmp.type = hir::TypeKind::Int;
+      cmp.symbol = "<";
+      cmp.result = newTemp(st);
+      cmp.args = { idxPhi, "#" + std::to_string(declaredSize) };
+      emit(func, condId, cmp);
+
+      Inst cbr;
+      cbr.kind = OpKind::CondBr;
+      cbr.args = { cmp.result };
+      cbr.targets = { bodyId, exitId };
+      emit(func, condId, cbr);
+
+      Inst zstore;
+      zstore.kind = OpKind::Store;
+      zstore.symbol = symbol;
+      zstore.args = { idxPhi, defaultToken(it->second.elementType) };
+      zstore.type = it->second.elementType;
+      zstore.memSize = elemSize;
+      emit(func, bodyId, zstore);
+
+      Inst add;
+      add.kind = OpKind::Arith;
+      add.type = hir::TypeKind::Int;
+      add.symbol = "+";
+      add.result = idxNext;
+      add.args = { idxPhi, "#1" };
+      emit(func, bodyId, add);
+
+      Inst back;
+      back.kind = OpKind::Br;
+      back.targets.push_back(condId);
+      emit(func, bodyId, back);
+
+      cur = exitId;
+      addStoreSym(stores, symbol);
+    }
+
+    for (size_t i = 0; i < astSize; i++) {
+      ASTNode *elem = (local->va && i < astSize) ? local->va[i] : nullptr;
+      if (!elem)
+        continue;
+      std::string token = lowerASTExpr(elem, it->second.elementType, func, st, cur, symbols);
       Inst store;
       store.kind = OpKind::Store;
-      store.symbol = op->symbol;
+      store.symbol = symbol;
       store.args = { "#" + std::to_string(i), token };
-      auto it = symbols.find(op->symbol);
-      if (it != symbols.end()) {
-        store.type = it->second.elementType;
-        store.memSize = it->second.elemSize;
-      } else {
-        store.type = hir::TypeKind::Int;
-        store.memSize = 4;
-      }
+      store.type = it->second.elementType;
+      store.memSize = elemSize;
       emit(func, cur, store);
-      addStoreSym(stores, op->symbol);
+      addStoreSym(stores, symbol);
     }
   }
 
@@ -439,25 +762,26 @@ private:
       return at;
     }
     case hir::OpKind::VarDecl: {
-      auto it = symbols.find(op->symbol);
+      std::string sym = getResolvedSymbol(op);
+      auto it = symbols.find(sym);
       bool isArray = it != symbols.end() && !it->second.dims.empty();
       if (isArray) {
         auto *var = dyn_cast<VarDeclNode>(op->origin);
-        emitLocalArrayInit(op, var, func, cur, symbols, stores);
+        emitLocalArrayInit(sym, var, func, st, cur, symbols, stores);
         return cur;
       }
       if (!op->children.empty()) {
         auto value = lowerExpr(op->children[0].get(), func, st, cur, symbols);
         Inst store;
         store.kind = OpKind::Store;
-        store.symbol = op->symbol;
+        store.symbol = sym;
         store.args.push_back(value);
         if (it != symbols.end()) {
           store.type = it->second.type;
           store.memSize = std::max((size_t) 4, it->second.storageSize);
         }
         emit(func, cur, store);
-        addStoreSym(stores, op->symbol);
+        addStoreSym(stores, sym);
       }
       return cur;
     }
@@ -466,18 +790,18 @@ private:
         return cur;
       Inst store;
       store.kind = OpKind::Store;
-      store.symbol = op->symbol;
+      store.symbol = getResolvedSymbol(op);
       for (size_t i = 0; i + 1 < op->children.size(); i++)
         store.args.push_back(lowerExpr(op->children[i].get(), func, st, cur, symbols));
       store.args.push_back(lowerExpr(op->children.back().get(), func, st, cur, symbols));
-      auto it = symbols.find(op->symbol);
+      auto it = symbols.find(store.symbol);
       if (it != symbols.end()) {
         bool indexed = store.args.size() > 1;
         store.type = indexed ? it->second.elementType : it->second.type;
         store.memSize = indexed ? it->second.elemSize : std::max((size_t) 4, it->second.storageSize);
       }
       emit(func, cur, store);
-      addStoreSym(stores, op->symbol);
+      addStoreSym(stores, store.symbol);
       return cur;
     }
     case hir::OpKind::Call:
@@ -527,12 +851,7 @@ private:
       int elseId = newBlock(func, st, "if.else");
       int mergeId = newBlock(func, st, "if.merge");
 
-      auto cond = normalizeCond(op->children[0].get(), func, st, cur, symbols);
-      Inst cbr;
-      cbr.kind = OpKind::CondBr;
-      cbr.args.push_back(cond);
-      cbr.targets = { thenId, elseId };
-      emit(func, cur, cbr);
+      emitCondBranch(op->children[0].get(), func, st, cur, symbols, thenId, elseId);
 
       std::set<std::string> thenStores;
       int thenEnd = lowerStmt(op->children[1].get(), func, st, thenId, breakTarget, continueTarget, symbols, &thenStores);
@@ -554,47 +873,9 @@ private:
         emit(func, elseEnd, br);
       }
 
-      std::vector<std::string> common;
-      std::set_intersection(
-        thenStores.begin(), thenStores.end(),
-        elseStores.begin(), elseStores.end(),
-        std::back_inserter(common));
-
-      bool thenFlowsToMerge = false;
-      bool elseFlowsToMerge = false;
-      if (thenEnd >= 0 && thenEnd < (int) func.blocks.size() && !func.blocks[thenEnd].insts.empty()) {
-        const auto &last = func.blocks[thenEnd].insts.back();
-        thenFlowsToMerge = last.kind == OpKind::Br && !last.targets.empty() && last.targets[0] == mergeId;
-      }
-      if (elseEnd >= 0 && elseEnd < (int) func.blocks.size() && !func.blocks[elseEnd].insts.empty()) {
-        const auto &last = func.blocks[elseEnd].insts.back();
-        elseFlowsToMerge = last.kind == OpKind::Br && !last.targets.empty() && last.targets[0] == mergeId;
-      }
-
-      if (thenFlowsToMerge && elseFlowsToMerge) {
-        for (const auto &sym : common) {
-          Inst phi;
-          phi.kind = OpKind::Phi;
-          auto it = symbols.find(sym);
-          phi.type = (it == symbols.end()) ? hir::TypeKind::Unknown : it->second.type;
-          phi.elementType = (it == symbols.end()) ? hir::TypeKind::Unknown : it->second.elementType;
-          phi.result = newTemp(st);
-          phi.symbol = sym;
-          phi.phiPreds = { thenEnd, elseEnd };
-          phi.args = { "$" + sym + "@then", "$" + sym + "@else" };
-          emit(func, mergeId, phi);
-
-          Inst store;
-          store.kind = OpKind::Store;
-          store.symbol = sym;
-          store.args = { phi.result };
-          if (it != symbols.end()) {
-            store.type = it->second.type;
-            store.memSize = std::max((size_t) 4, it->second.storageSize);
-          }
-          emit(func, mergeId, store);
-          addStoreSym(stores, sym);
-        }
+      if (stores) {
+        stores->insert(thenStores.begin(), thenStores.end());
+        stores->insert(elseStores.begin(), elseStores.end());
       }
       return mergeId;
     }
@@ -612,13 +893,7 @@ private:
       jump.targets.push_back(condId);
       emit(func, cur, jump);
 
-      int condAt = condId;
-      auto cond = normalizeCond(op->children[0].get(), func, st, condAt, symbols);
-      Inst cbr;
-      cbr.kind = OpKind::CondBr;
-      cbr.args.push_back(cond);
-      cbr.targets = { bodyId, exitId };
-      emit(func, condAt, cbr);
+      emitCondBranch(op->children[0].get(), func, st, condId, symbols, bodyId, exitId);
 
       std::set<std::string> bodyStores;
       int bodyEnd = lowerStmt(op->children[1].get(), func, st, bodyId, exitId, condId, symbols, &bodyStores);
@@ -650,13 +925,7 @@ private:
       toCond.targets.push_back(condId);
       emit(func, cur, toCond);
 
-      int condAt = condId;
-      auto cond = normalizeCond(op->children[1].get(), func, st, condAt, symbols);
-      Inst cbr;
-      cbr.kind = OpKind::CondBr;
-      cbr.args.push_back(cond);
-      cbr.targets = { bodyId, exitId };
-      emit(func, condAt, cbr);
+      emitCondBranch(op->children[1].get(), func, st, condId, symbols, bodyId, exitId);
 
       int bodyEnd = lowerStmt(op->children[3].get(), func, st, bodyId, exitId, stepId, symbols, stores);
       if (!isTerminated(func, bodyEnd)) {
@@ -685,6 +954,8 @@ private:
     FuncLoweringState st;
     func.name = funcOp.symbol.empty() ? "anonymous" : funcOp.symbol;
 
+    buildResolvedSymbols(funcOp);
+
     if (auto *fn = dyn_cast<FnDeclNode>(funcOp.origin)) {
       if (auto *fnTy = dyn_cast<FunctionType>(fn->type)) {
         func.returnType = hir::mapType(fnTy->ret);
@@ -708,6 +979,7 @@ private:
     int cur = func.entry;
     if (!funcOp.children.empty())
       cur = lowerStmt(funcOp.children[0].get(), func, st, cur, -1, -1, symbols, nullptr);
+    normalizePhiOrder(func);
     ensureTerminator(func, cur);
 
     for (int bid = 0; bid < (int) func.blocks.size(); bid++)

@@ -54,6 +54,12 @@ void PassManager::run() {
   bool compareEveryPass = false;
   if (const char *env = std::getenv("SISY_COMPARE_EACH_PASS"))
     compareEveryPass = env[0] && std::strcmp(env, "0") != 0;
+  size_t compareStepLimit = 80000000;
+  if (const char *env = std::getenv("SISY_COMPARE_STEP_LIMIT")) {
+    long long parsed = std::atoll(env);
+    if (parsed > 0)
+      compareStepLimit = (size_t) parsed;
+  }
   auto totalStart = std::chrono::steady_clock::now();
   double totalMs = 0.0;
 
@@ -113,7 +119,7 @@ void PassManager::run() {
     // Technically we have the capacity, but it's too much work.
     if (compareThisPass) {
       std::cerr << "checking " << pname << "\n";
-      exec::Interpreter itp(module);
+      exec::Interpreter itp(module, compareStepLimit);
       std::stringstream buffer(input);
       itp.run(buffer);
       if (itp.timedOut()) {

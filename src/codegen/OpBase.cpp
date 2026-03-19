@@ -736,13 +736,19 @@ void Region::updatePDoms() {
 
   std::vector<BasicBlock*> exits;
   for (auto bb : bbs) {
-    if (isa<ReturnOp>(bb->getLastOp()))
+    if (!bb || bb->getOpCount() == 0)
+      continue;
+    auto *last = bb->getLastOp();
+    if (last && isa<ReturnOp>(last))
       exits.push_back(bb);
   }
 
   if (exits.size() != 1) {
-    std::cerr << "no single exit for pdom\n";
-    assert(false);
+    for (auto bb : bbs) {
+      bb->pdoms.clear();
+      bb->ipdom = nullptr;
+    }
+    return;
   }
 
   auto exit = exits[0];

@@ -289,8 +289,16 @@ void Range::postdom(Region *region) {
   // First make sure the region has only a single exit.
   std::vector<BasicBlock*> exits;
   for (auto bb : region->getBlocks()) {
-    if (isa<ReturnOp>(bb->getLastOp()))
+    if (!bb || bb->getOpCount() == 0)
+      continue;
+    auto *last = bb->getLastOp();
+    if (last && isa<ReturnOp>(last))
       exits.push_back(bb);
+  }
+  if (exits.empty()) {
+    region->updateDoms();
+    region->updatePDoms();
+    return;
   }
   if (exits.size() > 1) {
     Builder builder;
@@ -316,8 +324,13 @@ void Range::postdom(Region *region) {
     }
 
     // Rewire all exits to the new exit.
-    for (auto bb : exits)
-      builder.replace<GotoOp>(bb->getLastOp(), { new TargetAttr(exit) });
+    for (auto bb : exits) {
+      if (!bb || bb->getOpCount() == 0)
+        continue;
+      auto *last = bb->getLastOp();
+      if (last)
+        builder.replace<GotoOp>(last, { new TargetAttr(exit) });
+    }
   }
 
   // Now we can calculate the post-domination tree.
@@ -329,6 +342,8 @@ void Range::split(Region *region) {
   Builder builder;
 
   for (auto bb : region->getBlocks()) {
+    if (!bb || bb->getOpCount() == 0)
+      continue;
     auto term = bb->getLastOp();
     if (!isa<BranchOp>(term))
       continue;
