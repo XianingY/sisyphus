@@ -1,9 +1,11 @@
 #include "Lexer.h"
+#include "CompileError.h"
 #include <cassert>
 #include <cctype>
 #include <cstdlib>
 #include <cmath>
 #include <map>
+#include <sstream>
 
 using namespace sys;
 
@@ -22,12 +24,18 @@ std::map<std::string, Token::Type> keywords = {
 };
 
 Token Lexer::nextToken() {
-  assert(loc < input.size());
+  if (loc >= input.size())
+    return Token::End;
   auto has = [&](int delta = 0) -> bool {
     return loc + delta < (int) input.size();
   };
   auto peekc = [&](int delta = 0) -> char {
     return input[loc + delta];
+  };
+  auto fail = [&](const std::string &msg) -> Token {
+    std::ostringstream os;
+    os << "lexer error at line " << lineno << ": " << msg;
+    throw CompileError(os.str());
   };
 
   // Skip whitespace
@@ -66,12 +74,16 @@ Token Lexer::nextToken() {
   if (std::isdigit((unsigned char) c) || c == '.') {
     int start = loc;
     bool isFloat = false;
+    bool sawExp = false;
 
     if (c == '0') {
       if (has(1) && (peekc(1) == 'x' || peekc(1) == 'X')) {
         // Hexadecimal, skip '0x'
         loc += 2;
+        bool hasHexDigit = false;
         while (has() && (std::isxdigit((unsigned char) peekc()) || peekc() == '.')) {
+          if (std::isxdigit((unsigned char) peekc()))
+            hasHexDigit = true;
           if (peekc() == '.') {
             // Already seen a '.' before. Shouldn't continue.
             if (isFloat)
@@ -81,21 +93,44 @@ Token Lexer::nextToken() {
           }
           loc++;
         }
+        if (!hasHexDigit)
+          return fail("invalid hexadecimal literal");
 
         // Try to read a 'p' for exponent.
         if (has() && (peekc() == 'p' || peekc() == 'P')) {
           isFloat = true;
+          sawExp = true;
           loc++;
 
           if (has() && (peekc() == '+' || peekc() == '-'))
             loc++;
-          
-          while (has() && std::isdigit((unsigned char) peekc())) 
+
+          int expStart = loc;
+          while (has() && std::isdigit((unsigned char) peekc()))
             loc++;
+          if (loc == expStart)
+            return fail("hex float exponent has no digits");
         }
+        if (isFloat && !sawExp)
+          return fail("hex float literal missing exponent");
 
         std::string raw = input.substr(start, loc - start);
-        return isFloat ? Token(strtof(raw.c_str(), nullptr)) : std::stoi(raw, nullptr, /*base = autodetect*/0);
+        if (isFloat) {
+          char *end = nullptr;
+          float value = strtof(raw.c_str(), &end);
+          if (!end || *end != '\0')
+            return fail("invalid float literal '" + raw + "'");
+          return Token(value);
+        }
+        try {
+          size_t pos = 0;
+          int value = std::stoi(raw, &pos, /*base = autodetect*/0);
+          if (pos != raw.size())
+            return fail("invalid integer literal '" + raw + "'");
+          return Token(value);
+        } catch (...) {
+          return fail("invalid integer literal '" + raw + "'");
+        }
       }
 
       // Octal. But let `std::stoi` to check for it.
@@ -117,17 +152,36 @@ Token Lexer::nextToken() {
     // Try to read an 'e' for exponent.
     if (has() && (peekc() == 'e' || peekc() == 'E')) {
       isFloat = true;
+      sawExp = true;
       loc++;
 
       if (has() && (peekc() == '+' || peekc() == '-'))
         loc++;
-      
-      while (has() && std::isdigit((unsigned char) peekc())) 
+
+      int expStart = loc;
+      while (has() && std::isdigit((unsigned char) peekc()))
         loc++;
+      if (loc == expStart)
+        return fail("float exponent has no digits");
     }
 
     std::string raw = input.substr(start, loc - start);
-    return isFloat ? Token(strtof(raw.c_str(), nullptr)) : std::stoi(raw, nullptr, /*base = autodetect*/0);
+    if (isFloat) {
+      char *end = nullptr;
+      float value = strtof(raw.c_str(), &end);
+      if (!end || *end != '\0')
+        return fail("invalid float literal '" + raw + "'");
+      return Token(value);
+    }
+    try {
+      size_t pos = 0;
+      int value = std::stoi(raw, &pos, /*base = autodetect*/0);
+      if (pos != raw.size())
+        return fail("invalid integer literal '" + raw + "'");
+      return Token(value);
+    } catch (...) {
+      return fail("invalid integer literal '" + raw + "'");
+    }
   }
 
   // Check for multi-character operators like >=, <=, ==, !=, +=, etc.
@@ -177,7 +231,7 @@ Token Lexer::nextToken() {
             return nextToken();
           }
         }
-        return Token::End;
+        return fail("unterminated block comment");
       }
       break;
     case '%': 
@@ -214,8 +268,7 @@ Token Lexer::nextToken() {
   case '{': loc++; return Token::LBrace;
   case '}': loc++; return Token::RBrace;
   default:
-    assert(false);
-    std::abort();
+    return fail(std::string("unexpected character '") + c + "'");
   }
 }
 

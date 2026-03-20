@@ -8,6 +8,7 @@
 #include <iostream>
 #include <vector>
 #include <set>
+#include <sstream>
 
 using namespace sys;
 
@@ -32,16 +33,38 @@ ArrayType *Sema::raise(PointerType *ptr) {
   return ctx.create<ArrayType>(base, dims);
 }
 
+[[noreturn]] void Sema::fail(const std::string &msg) {
+  throw CompileError("sema error: " + msg);
+}
+
+void Sema::declareSymbol(const std::string &name, Type *ty, bool isMutable) {
+  if (scopeDecls.empty())
+    scopeDecls.emplace_back();
+  auto &cur = scopeDecls.back();
+  if (cur.count(name))
+    fail("duplicate declaration in same scope: " + name);
+  cur.insert(name);
+  symbols[name] = ty;
+  mutableSymbols[name] = isMutable;
+}
+
+bool Sema::isMutableSymbol(const std::string &name) const {
+  auto it = mutableSymbols.find(name);
+  if (it == mutableSymbols.end())
+    return true;
+  return it->second;
+}
+
 Type *Sema::infer(ASTNode *node) {
   if (auto fn = dyn_cast<FnDeclNode>(node)) {
     assert(fn->type);
     auto fnTy = cast<FunctionType>(fn->type);
-    symbols[fn->name] = fn->type;
+    declareSymbol(fn->name, fn->type, true);
     currentFunc = fnTy;
 
     SemanticScope scope(*this);
     for (int i = 0; i < fn->args.size(); i++) {
-      symbols[fn->args[i]] = fnTy->params[i];
+      declareSymbol(fn->args[i], fnTy->params[i], true);
     }
 
     for (auto x : fn->body->nodes)
@@ -74,6 +97,8 @@ Type *Sema::infer(ASTNode *node) {
   if (auto binary = dyn_cast<BinaryNode>(node)) {
     auto lty = infer(binary->l);
     auto rty = infer(binary->r);
+    if (isa<VoidType>(lty) || isa<VoidType>(rty))
+      fail("void value used in binary expression");
 
     // Special: we need to convert float to comparison with zero.
     if (binary->kind == BinaryNode::And || binary->kind == BinaryNode::Or) {
@@ -120,8 +145,7 @@ Type *Sema::infer(ASTNode *node) {
       return node->type = ctx.create<FloatType>();
 
     if (lty != rty) {
-      std::cerr << "bad binary op\n";
-      assert(false);
+      fail("incompatible operand types in binary operation");
     }
     
     return node->type = ctx.create<IntType>();
@@ -129,6 +153,8 @@ Type *Sema::infer(ASTNode *node) {
 
   if (auto unary = dyn_cast<UnaryNode>(node)) {
     auto ty = infer(unary->node);
+    if (isa<VoidType>(ty))
+      fail("void value used in unary expression");
     // These two ops won't be emitted in parser.
     assert(unary->kind != UnaryNode::Float2Int && unary->kind != UnaryNode::Int2Float);
 
@@ -140,7 +166,7 @@ Type *Sema::infer(ASTNode *node) {
 
   if (auto vardecl = dyn_cast<VarDeclNode>(node)) {
     assert(node->type);
-    symbols[vardecl->name] = node->type;
+    declareSymbol(vardecl->name, node->type, vardecl->mut);
     if (!vardecl->init)
       return ctx.create<VoidType>();
 
@@ -162,20 +188,23 @@ Type *Sema::infer(ASTNode *node) {
       }
 
       if (ty != vardecl->type) {
-        std::cerr << "bad assignment\n";
-        assert(false);
+        fail("incompatible initializer type");
       }
     }
     return ctx.create<VoidType>();
   }
 
   if (auto ret = dyn_cast<ReturnNode>(node)) {
-    if (!ret->node)
-      return ctx.create<VoidType>();
-    
-    auto ty = infer(ret->node);
-
     auto retTy = cast<FunctionType>(currentFunc)->ret;
+    if (!ret->node) {
+      if (!isa<VoidType>(retTy))
+        fail("non-void function must return a value");
+      return ctx.create<VoidType>();
+    }
+    if (isa<VoidType>(retTy))
+      fail("void function cannot return a value");
+
+    auto ty = infer(ret->node);
     if (isa<IntType>(retTy) && isa<FloatType>(ty)) {
       ret->node = new UnaryNode(UnaryNode::Float2Int, ret->node);
       ret->node->type = ctx.create<IntType>();
@@ -189,16 +218,14 @@ Type *Sema::infer(ASTNode *node) {
     }
 
     if (retTy != ret->node->type) {
-      std::cerr << "bad return\n";
-      assert(false);
+      fail("return type mismatch");
     }
     return ctx.create<VoidType>();
   }
   
   if (auto ref = dyn_cast<VarRefNode>(node)) {
     if (!symbols.count(ref->name)) {
-      std::cerr << "cannot find symbol " << ref->name << "\n";
-      assert(false);
+      fail("cannot find symbol " + ref->name);
     }
     auto ty = symbols[ref->name];
 
@@ -231,17 +258,30 @@ Type *Sema::infer(ASTNode *node) {
 
   if (auto loop = dyn_cast<WhileNode>(node)) {
     auto condTy = infer(loop->cond);
-    if (!isa<IntType>(condTy)) {
-      std::cerr << "bad cond type\n";
-      assert(false);
+    if (isa<FloatType>(condTy)) {
+      auto zero = new FloatNode(0);
+      zero->type = ctx.create<FloatType>();
+      auto ne = new BinaryNode(BinaryNode::Ne, loop->cond, zero);
+      ne->type = ctx.create<IntType>();
+      loop->cond = ne;
+    } else if (!isa<IntType>(condTy)) {
+      fail("while condition must be int/float");
     }
     infer(loop->body);
     return node->type = ctx.create<VoidType>();
   }
 
   if (auto assign = dyn_cast<AssignNode>(node)) {
+    auto lref = dyn_cast<VarRefNode>(assign->l);
+    if (!lref)
+      fail("left side of assignment must be variable");
+    if (!isMutableSymbol(lref->name))
+      fail("cannot assign to const variable " + lref->name);
+
     auto lty = infer(assign->l);
     auto rty = infer(assign->r);
+    if (isa<VoidType>(rty))
+      fail("void value cannot be assigned");
     if (isa<IntType>(lty) && isa<FloatType>(rty)) {
       assign->r = new UnaryNode(UnaryNode::Float2Int, assign->r);
       assign->r->type = ctx.create<IntType>();
@@ -255,8 +295,7 @@ Type *Sema::infer(ASTNode *node) {
     }
 
     if (lty != rty) {
-      std::cerr << "bad assignment\n";
-      assert(false);
+      fail("assignment type mismatch");
     }
     return node->type = ctx.create<VoidType>();
   }
@@ -293,11 +332,25 @@ Type *Sema::infer(ASTNode *node) {
   }
 
   if (auto call = dyn_cast<CallNode>(node)) {
-    auto fnTy = cast<FunctionType>(symbols[call->func]);
+    if (!symbols.count(call->func))
+      fail("cannot find function " + call->func);
+    auto *symTy = symbols[call->func];
+    if (!isa<FunctionType>(symTy))
+      fail(call->func + " is not a function");
+    auto fnTy = cast<FunctionType>(symTy);
+    if (call->args.size() != fnTy->params.size()) {
+      std::ostringstream os;
+      os << "function argument count mismatch for " << call->func
+         << ": expected " << fnTy->params.size()
+         << ", got " << call->args.size();
+      fail(os.str());
+    }
     for (size_t i = 0; i < fnTy->params.size(); i++) {
       ASTNode *&x = call->args[i];
       auto ty = infer(x);
       auto argTy = fnTy->params[i];
+      if (isa<VoidType>(ty))
+        fail("void value cannot be used as function argument");
 
       if (isa<FloatType>(ty) && isa<IntType>(argTy)) {
         x = new UnaryNode(UnaryNode::Float2Int, x);
@@ -313,20 +366,20 @@ Type *Sema::infer(ASTNode *node) {
 
       // Both pointers / arrays.
     }
-    if (!symbols.count(call->func)) {
-      std::cerr << "cannot find function " << call->func << "\n";
-      assert(false);
-    }
     return node->type = fnTy->ret;
   }
 
   if (auto access = dyn_cast<ArrayAccessNode>(node)) {
+    if (!symbols.count(access->array))
+      fail("cannot find array symbol " + access->array);
     auto realTy = symbols[access->array];
     ArrayType *arrTy;
     if (isa<ArrayType>(realTy))
       arrTy = cast<ArrayType>(realTy);
-    else
+    else if (isa<PointerType>(realTy))
       arrTy = raise(cast<PointerType>(realTy));
+    else
+      fail(access->array + " is not array/pointer");
     
     access->arrTy = arrTy;
     std::vector<int> dimsNew;
@@ -335,7 +388,8 @@ Type *Sema::infer(ASTNode *node) {
     
     for (auto x : access->indices) {
       auto ty = infer(x);
-      assert(isa<IntType>(ty));
+      if (!isa<IntType>(ty))
+        fail("array index must be int");
     }
 
     auto resultTy = dimsNew.size()
@@ -345,23 +399,31 @@ Type *Sema::infer(ASTNode *node) {
   }
 
   if (auto write = dyn_cast<ArrayAssignNode>(node)) {
+    if (!symbols.count(write->array))
+      fail("cannot find array symbol " + write->array);
     auto realTy = symbols[write->array];
     ArrayType *arrTy;
     if (isa<ArrayType>(realTy))
       arrTy = cast<ArrayType>(realTy);
-    else
+    else if (isa<PointerType>(realTy))
       arrTy = raise(cast<PointerType>(realTy));
+    else
+      fail(write->array + " is not array/pointer");
 
     auto baseTy = arrTy->base;
-    assert(write->indices.size() == arrTy->dims.size());
+    if (write->indices.size() != arrTy->dims.size())
+      fail("array assignment index rank mismatch");
     write->arrTy = arrTy;
 
     for (auto x : write->indices) {
       auto ty = infer(x);
-      assert(isa<IntType>(ty));
+      if (!isa<IntType>(ty))
+        fail("array index must be int");
     }
 
     auto valueTy = infer(write->value);
+    if (isa<VoidType>(valueTy))
+      fail("void value cannot be assigned to array element");
 
     if (isa<FloatType>(baseTy) && isa<IntType>(valueTy)) {
       write->value = new UnaryNode(UnaryNode::Int2Float, write->value);
@@ -376,9 +438,7 @@ Type *Sema::infer(ASTNode *node) {
     return node->type = ctx.create<VoidType>();
   }
 
-  std::cerr << "cannot infer node " << node->getID() << "\n";
-  assert(false);
-  std::abort();
+  fail("cannot infer AST node kind");
 }
 
 Sema::Sema(ASTNode *node, TypeContext &ctx): ctx(ctx) {
@@ -406,6 +466,9 @@ Sema::Sema(ASTNode *node, TypeContext &ctx): ctx(ctx) {
     { "_sysy_starttime", ctx.create<FunctionType>(voidTy, Args { intTy }) },
     { "_sysy_stoptime", ctx.create<FunctionType>(voidTy, Args { intTy }) },
   };
+  for (const auto &it : symbols) {
+    mutableSymbols[it.first] = true;
+  }
 
   infer(node);
 }

@@ -7,6 +7,7 @@
 #include <cassert>
 
 #include "ASTNode.h"
+#include "CompileError.h"
 #include "Lexer.h"
 #include "TypeContext.h"
 
@@ -72,6 +73,7 @@ class Parser {
 
   // Prints tokens in range [loc-5, loc+5]. For debugging purposes.
   void printSurrounding();
+  [[noreturn]] void fail(const std::string &msg);
 
   template<class... Rest>
   bool peek(Token::Type t, Rest... ts) {

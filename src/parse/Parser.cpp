@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <ostream>
 #include <vector>
+#include <sstream>
 
 using namespace sys;
 
@@ -109,11 +110,17 @@ bool Parser::peek(Token::Type t) {
 
 Token Parser::expect(Token::Type t) {
   if (!test(t)) {
-    std::cerr << "expected " << t << ", but got " << peek().type << "\n";
-    printSurrounding();
-    assert(false);
+    std::ostringstream os;
+    os << "parser error: expected " << t << ", but got " << peek().type;
+    fail(os.str());
   }
   return last();
+}
+
+[[noreturn]] void Parser::fail(const std::string &msg) {
+  std::cerr << msg << "\n";
+  printSurrounding();
+  throw CompileError(msg);
 }
 
 void Parser::printSurrounding() {
@@ -142,9 +149,7 @@ Type *Parser::parseSimpleType() {
   case Token::Float:
     return ctx.create<FloatType>();
   default:
-    std::cerr << "unknown type: " << peek().type << "\n";
-    assert(false);
-    std::abort();
+    fail("parser error: unknown type token");
   }
 }
 
@@ -284,10 +289,9 @@ ASTNode *Parser::primary() {
     return new VarRefNode(vs);
   }
 
-  std::cerr << "unexpected token " << peek().type << "\n";
-  printSurrounding();
-  assert(false);
-  std::abort();
+  std::ostringstream os;
+  os << "parser error: unexpected token " << peek().type;
+  fail(os.str());
 }
 
 ASTNode *Parser::unary() {
@@ -451,8 +455,7 @@ ASTNode *Parser::stmt() {
   auto n = expr();
   if (test(Token::Assign)) {
     if (!isa<VarRefNode>(n)) {
-      std::cerr << "expected lval\n";
-      assert(false);
+      fail("parser error: expected assignable lvalue");
     }
     auto value = expr();
     expect(Token::Semicolon);
@@ -538,8 +541,9 @@ TransparentBlockNode *Parser::varDecl(bool global) {
     decls.push_back(decl);
 
     // Record in symbol table.
-    if (!mut || global) {
-      assert(init);
+    if (!mut) {
+      if (!init)
+        fail("parser error: const declaration requires initializer");
       symbols[name] = earlyFold(init);
     }
 
@@ -606,7 +610,7 @@ BlockNode *Parser::compUnit() {
     // while for variables it's `=`.
     // Moreover, the Type is only a single token,
     // so we lookahead for 2 tokens.
-    if (tokens[loc + 2].type == Token::LPar) {
+    if (loc + 2 < tokens.size() && tokens[loc + 2].type == Token::LPar) {
       nodes.push_back(fnDecl());
       continue;
     }
@@ -622,8 +626,7 @@ BlockNode *Parser::compUnit() {
 ConstValue Parser::earlyFold(ASTNode *node) {
   if (auto ref = dyn_cast<VarRefNode>(node)) {
     if (!symbols.count(ref->name)) {
-      std::cerr << "cannot find const: " << ref->name << "\n";
-      assert(false);
+      fail("parser error: non-constexpr symbol in constant expression: " + ref->name);
     }
     return symbols[ref->name];
   }
@@ -735,12 +738,12 @@ ConstValue Parser::earlyFold(ASTNode *node) {
   if (auto arr = dyn_cast<ConstArrayNode>(node))
     return ConstValue(arr->vi, cast<ArrayType>(arr->type)->dims);
   
-  if (auto arr = dyn_cast<LocalArrayNode>(node)) {
+    if (auto arr = dyn_cast<LocalArrayNode>(node)) {
     // This implies that the whole LocalArray is constant. Try to fold it.
     auto arrTy = cast<ArrayType>(arr->type);
     bool isFloat = isa<FloatType>(arrTy->base);
     if (isFloat) {
-      assert(false);
+      fail("parser error: float local array is not constexpr");
     } else {
       int size = arrTy->getSize();
       int *result = new int[size];
@@ -757,9 +760,7 @@ ConstValue Parser::earlyFold(ASTNode *node) {
     }
   }
 
-  std::cerr << "not constexpr: " << node->getID() << "\n";
-  assert(false);
-  std::abort();
+  fail("parser error: expression is not constexpr");
 }
 
 Parser::Parser(const std::string &input, TypeContext &ctx): loc(0), ctx(ctx) {
@@ -770,7 +771,8 @@ Parser::Parser(const std::string &input, TypeContext &ctx): loc(0), ctx(ctx) {
 }
 
 ASTNode *Parser::parse() {
-  auto unit = compUnit();
+  ASTNode *unit = nullptr;
+  unit = compUnit();
 
   // Release memory.
   for (auto tok : tokens) {
