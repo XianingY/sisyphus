@@ -22,7 +22,12 @@ enum class FrontendProfile {
 
 struct PipelineMetrics {
   size_t moduleOpCount = 0;
+  size_t blockCount = 0;
   size_t cfgEdgeCount = 0;
+  size_t phiCount = 0;
+  size_t callLikeCount = 0;
+  size_t getArgCount = 0;
+  int maxGetArgArity = 0;
   int maxLoopDepth = 0;
 };
 
@@ -34,6 +39,14 @@ struct PipelinePlan {
   bool enableO2Heavy;
   int o2LoopRounds;
   bool largeModuleMode;
+  bool hugeModuleMode;
+  bool backendFastMode;
+  bool armTimeoutSafeMode;
+  int armInstCombineRounds;
+  int armPeepholeRounds;
+  int armRegAllocCallPenalty;
+  int armRegAllocLoopBoost;
+  int armRegAllocPreferBudget;
   PipelineMetrics metrics;
   bool useArmBackend;
   bool useRvBackend;

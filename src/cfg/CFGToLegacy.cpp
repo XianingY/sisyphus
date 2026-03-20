@@ -510,6 +510,7 @@ private:
 
   Value buildIndexedAddress(FunctionState &st, int bid, const SymbolInfo &info, Value base,
                             const std::vector<std::string> &indices,
+                            const std::vector<size_t> *explicitStrides = nullptr,
                             bool linearizedScalarIndex = false) {
     if (indices.empty())
       return base;
@@ -519,7 +520,11 @@ private:
       elemSize = 4;
 
     std::vector<size_t> strides(indices.size(), elemSize);
-    if (!info.dims.empty() && !(linearizedScalarIndex && indices.size() == 1)) {
+    if (explicitStrides && !explicitStrides->empty()) {
+      size_t usable = std::min(indices.size(), explicitStrides->size());
+      for (size_t i = 0; i < usable; i++)
+        strides[i] = (*explicitStrides)[i];
+    } else if (!info.dims.empty() && !(linearizedScalarIndex && indices.size() == 1)) {
       for (size_t i = 0; i < indices.size(); i++) {
         size_t stride = elemSize;
         for (size_t j = i + 1; j < info.dims.size(); j++)
@@ -680,19 +685,19 @@ private:
     std::vector<std::string> indices = inst.args;
 
     Value out;
-    bool pointerResult = inst.type == hir::TypeKind::Pointer || inst.type == hir::TypeKind::Array;
+    bool pointerResult = inst.producesAddress || inst.type == hir::TypeKind::Pointer || inst.type == hir::TypeKind::Array;
     if (pointerResult && isArrayLike(sym)) {
       if (indices.empty())
         out = base;
       else
-        out = buildIndexedAddress(st, bid, sym, base, indices);
+        out = buildIndexedAddress(st, bid, sym, base, indices, &inst.strideBytes);
     } else {
       bool indexed = !indices.empty();
       const bool linearizedScalarIndex =
         indexed && indices.size() == 1 && sym.dims.size() > 1 &&
         inst.type == sym.elementType &&
         (inst.memSize == 0 || inst.memSize == (sym.elemSize ? sym.elemSize : defaultSize(sym.elementType)));
-      auto addr = buildIndexedAddress(st, bid, sym, base, indices, linearizedScalarIndex);
+      auto addr = buildIndexedAddress(st, bid, sym, base, indices, &inst.strideBytes, linearizedScalarIndex);
       auto ty = indexed ? toValueType(sym.elementType) : toValueType(inst.type);
       if (ty == Value::i128)
         ty = Value::i32;
@@ -728,7 +733,7 @@ private:
     const bool linearizedScalarIndex =
       indexed && indices.size() == 1 && sym.dims.size() > 1 &&
       (inst.memSize == 0 || inst.memSize == (sym.elemSize ? sym.elemSize : defaultSize(sym.elementType)));
-    auto addr = indexed ? buildIndexedAddress(st, bid, sym, base, indices, linearizedScalarIndex) : base;
+    auto addr = indexed ? buildIndexedAddress(st, bid, sym, base, indices, &inst.strideBytes, linearizedScalarIndex) : base;
 
     size_t sz = loadStoreSize(inst, sym, indexed);
     if (!sz)

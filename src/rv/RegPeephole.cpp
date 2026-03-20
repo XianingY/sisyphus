@@ -741,10 +741,13 @@ void save(Builder builder, const std::vector<Reg> &regs, int offset) {
       // li   t6, offset
       // addi t6, t6, sp
       // sd   reg, 0(t6)
-      // (Because reg might be `s11`)
-      builder.create<LiOp>({ RDC(spillReg2), new IntAttr(offset) });
-      builder.create<AddOp>({ RDC(spillReg2), RSC(spillReg2), RS2C(Reg::sp) });
-      CREATE_STORE(spillReg2, 0);
+      // Use a dedicated scratch that never appears in callee-saved restore list.
+      Reg scratch = Reg::t6;
+      if (scratch == reg)
+        scratch = Reg::t5;
+      builder.create<LiOp>({ RDC(scratch), new IntAttr(offset) });
+      builder.create<AddOp>({ RDC(scratch), RSC(scratch), RS2C(Reg::sp) });
+      CREATE_STORE(scratch, 0);
     }
   }
 }
@@ -781,10 +784,11 @@ void emitStackLoad(Builder &builder, Reg dst, Value::Type ty, int offset) {
     return;
   }
 
-  materializeSpAddr(builder, spillReg2, offset);
+  Reg scratch = (dst == Reg::t6 ? Reg::t5 : Reg::t6);
+  materializeSpAddr(builder, scratch, offset);
   builder.create<sys::rv::LoadOp>(ty, {
     RDC(dst),
-    RSC(spillReg2),
+    RSC(scratch),
     new IntAttr(0),
     new SizeAttr(8)
   });
@@ -817,9 +821,12 @@ void load(Builder builder, const std::vector<Reg> &regs, int offset) {
       // li   s11, offset
       // addi s11, s11, sp
       // ld   reg, 0(s11)
-      builder.create<LiOp>({ RDC(spillReg), new IntAttr(offset) });
-      builder.create<AddOp>({ RDC(spillReg), RSC(spillReg), RS2C(Reg::sp) });
-      CREATE_LOAD(spillReg, 0);
+      Reg scratch = Reg::t6;
+      if (scratch == reg)
+        scratch = Reg::t5;
+      builder.create<LiOp>({ RDC(scratch), new IntAttr(offset) });
+      builder.create<AddOp>({ RDC(scratch), RSC(scratch), RS2C(Reg::sp) });
+      CREATE_LOAD(scratch, 0);
     }
   }
 }

@@ -159,6 +159,7 @@ void DSE::removeUnread(Op *op, const std::vector<Op*> &gets) {
 }
 
 void DSE::run() {
+  ArrayStrideAnalysis(module).run();
   Alias(module).run();
   
   auto funcs = collectFuncs();

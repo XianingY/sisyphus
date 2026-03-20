@@ -43,6 +43,23 @@ public:
   void run() override;
 };
 
+// Canonicalize array/pointer address expressions into stable base+stride form.
+// This prepares lower-risk wins for Alias/DSE/DLE/GVN without changing semantics.
+class ArrayStrideAnalysis : public Pass {
+  int rewritten = 0;
+
+public:
+  ArrayStrideAnalysis(ModuleOp *module): Pass(module) {}
+
+  std::string name() override { return "array-stride-analysis"; }
+  std::map<std::string, int> stats() override {
+    return {
+      { "rewritten", rewritten }
+    };
+  }
+  void run() override;
+};
+
 // Integer range analysis.
 class Range : public Pass {
   // The set of all loop headers in a function.

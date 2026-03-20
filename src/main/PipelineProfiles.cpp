@@ -40,20 +40,35 @@ bool getenvEnabled(const char *name, bool fallback) {
   return true;
 }
 
-void appendArmBackend(sys::PassManager &pm, const sys::Options &opts) {
+size_t complexityScore(const PipelineMetrics &metrics) {
+  return metrics.moduleOpCount
+       + metrics.blockCount * 4
+       + metrics.cfgEdgeCount / 2
+       + metrics.phiCount * 12
+       + metrics.callLikeCount * 24
+       + (size_t) std::max(0, metrics.maxLoopDepth) * 128;
+}
+
+void appendArmBackend(sys::PassManager &pm, const sys::Options &opts, const PipelinePlan &plan) {
   pm.addPass<sys::arm::Lower>();
   pm.addPass<sys::arm::StrengthReduct>();
-  pm.addPass<sys::arm::InstCombine>();
+  pm.addPass<sys::arm::InstCombine>(plan.armInstCombineRounds);
   pm.addPass<sys::arm::ArmDCE>();
   pm.addPass<sys::GVN>();
   pm.addPass<sys::arm::PostIncr>();
   pm.addPass<sys::arm::ArmDCE>();
-  pm.addPass<sys::arm::RegAlloc>();
+  pm.addPass<sys::arm::RegAlloc>(
+    plan.backendFastMode,
+    plan.armRegAllocCallPenalty,
+    plan.armRegAllocLoopBoost,
+    plan.armRegAllocPreferBudget,
+    plan.armPeepholeRounds
+  );
   pm.addPass<sys::arm::LateLegalize>();
   pm.addPass<sys::arm::Dump>(opts.outputFile);
 }
 
-void appendRvBackend(sys::PassManager &pm, const sys::Options &opts) {
+void appendRvBackend(sys::PassManager &pm, const sys::Options &opts, const PipelinePlan &plan) {
   pm.addPass<sys::rv::Lower>();
   if (getenvEnabled("SISY_RV_ENABLE_STRENGTH_REDUCT", true))
     pm.addPass<sys::rv::StrengthReduct>();
@@ -61,7 +76,7 @@ void appendRvBackend(sys::PassManager &pm, const sys::Options &opts) {
     pm.addPass<sys::rv::InstCombine>();
   pm.addPass<sys::rv::RvDCE>();
   pm.addPass<sys::GVN>();
-  pm.addPass<sys::rv::RegAlloc>();
+  pm.addPass<sys::rv::RegAlloc>(plan.backendFastMode);
   pm.addPass<sys::rv::Dump>(opts.outputFile);
 }
 
@@ -90,7 +105,10 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, const Pipeline
   const bool enableO2Experimental = plan.enableO2Experimental;
   const bool enableO1LiteTail = !aggressive;
   const bool armSafeStructured = opts.arm && !aggressive;
-  const bool economyMode = plan.largeModuleMode;
+  // "large" modules use an economy lane to cap compile-time, but "huge"
+  // modules are safer with the full O1-style shrink pipeline before backend.
+  // This avoids sending oversized IR to regalloc on cases like 84_long_array2.
+  const bool economyMode = plan.largeModuleMode && !plan.hugeModuleMode;
 
   pm.addPass<sys::MoveAlloca>();
 
@@ -115,6 +133,7 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, const Pipeline
       pm.addPass<sys::GVN>();
       pm.addPass<sys::DCE>();
       pm.addPass<sys::Mem2Reg>();
+      pm.addPass<sys::ArrayStrideAnalysis>();
       pm.addPass<sys::RegularFold>();
       pm.addPass<sys::DCE>();
       pm.addPass<sys::SimplifyCFG>();
@@ -132,6 +151,7 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, const Pipeline
     pm.addPass<sys::Globalize>();
 
     pm.addPass<sys::Mem2Reg>();
+    pm.addPass<sys::ArrayStrideAnalysis>();
     pm.addPass<sys::Alias>();
     pm.addPass<sys::RegularFold>();
     pm.addPass<sys::DCE>();
@@ -171,6 +191,7 @@ void appendCoreO1(sys::PassManager &pm, const sys::Options &opts, const Pipeline
     pm.addPass<sys::Select>();
     if ((aggressive || enableO1LiteTail) && !economyMode) {
       pm.addPass<sys::Range>();
+      pm.addPass<sys::EqClass>();
       pm.addPass<sys::RangeAwareFold>();
       pm.addPass<sys::Splice>();
     }
@@ -318,21 +339,121 @@ PipelinePlan selectPlan(const Options &opts, PipelineMetrics metrics) {
   // O1 is the stable competition mainline; O2 is the only aggressive lane.
   plan.aggressive = opts.o2;
   plan.enableO2Experimental = opts.o2 && !opts.disableO2Experimental;
-  plan.enableO2Heavy = plan.enableO2Experimental && getenvEnabled("SISY_O2_ENABLE_HEAVY", true);
+  // Keep O2 stable by default. Heavy experimental passes can still be enabled
+  // explicitly via SISY_O2_ENABLE_HEAVY=1.
+  plan.enableO2Heavy = plan.enableO2Experimental && getenvEnabled("SISY_O2_ENABLE_HEAVY", false);
   plan.o2LoopRounds = getenvPositive("SISY_O2_LOOP_ROUNDS", 3, 1, 8);
   plan.metrics = metrics;
+  plan.armTimeoutSafeMode = false;
+  plan.armInstCombineRounds = -1;
+  plan.armPeepholeRounds = -1;
+  plan.armRegAllocCallPenalty = 128;
+  plan.armRegAllocLoopBoost = 1;
+  plan.armRegAllocPreferBudget = -1;
 
   const bool largeModeEnabled = getenvEnabled("SISY_O2_LARGE_MODE", true);
+  const bool hugeModeEnabled = getenvEnabled("SISY_O2_HUGE_MODE", true);
   const size_t opThreshold = (size_t) getenvPositive("SISY_O2_LARGE_THRESHOLD_OPS", 1800, 1000, 2000000);
+  const size_t blockThreshold = (size_t) getenvPositive("SISY_O2_LARGE_THRESHOLD_BLOCKS", 220, 10, 2000000);
   const size_t edgeThreshold = (size_t) getenvPositive("SISY_O2_LARGE_THRESHOLD_CFG_EDGES", 12000, 100, 5000000);
+  const size_t phiThreshold = (size_t) getenvPositive("SISY_O2_LARGE_THRESHOLD_PHIS", 256, 1, 2000000);
+  const size_t callThreshold = (size_t) getenvPositive("SISY_O2_LARGE_THRESHOLD_CALLS", 48, 1, 2000000);
   const int depthThreshold = getenvPositive("SISY_O2_LARGE_THRESHOLD_LOOP_DEPTH", 8, 1, 256);
+  const size_t scoreThreshold = (size_t) getenvPositive("SISY_O2_LARGE_THRESHOLD_SCORE", 12000, 100, 5000000);
+  const size_t hugeOpThreshold = (size_t) getenvPositive("SISY_O2_HUGE_THRESHOLD_OPS", 45000, 1000, 4000000);
+  const size_t hugeScoreThreshold = (size_t) getenvPositive("SISY_O2_HUGE_THRESHOLD_SCORE", 50000, 1000, 8000000);
   const bool hitOps = plan.metrics.moduleOpCount >= opThreshold;
+  const bool hitBlocks = plan.metrics.blockCount >= blockThreshold;
   const bool hitEdges = plan.metrics.cfgEdgeCount >= edgeThreshold;
+  const bool hitPhis = plan.metrics.phiCount >= phiThreshold;
+  const bool hitCalls = plan.metrics.callLikeCount >= callThreshold;
   const bool hitDepth = plan.metrics.maxLoopDepth >= depthThreshold;
+  const size_t score = complexityScore(plan.metrics);
+  const bool hitScore = score >= scoreThreshold;
+  const bool hitHugeOps = plan.metrics.moduleOpCount >= hugeOpThreshold;
+  const bool hitHugeScore = score >= hugeScoreThreshold;
+  const bool highParamPressure = plan.metrics.maxGetArgArity > 8 || plan.metrics.getArgCount >= 256;
   // O2-only downshift for super-complex IR; O1 remains stable baseline.
-  plan.largeModuleMode = plan.aggressive && largeModeEnabled && (hitOps || hitEdges || hitDepth);
+  plan.largeModuleMode = plan.aggressive && largeModeEnabled &&
+                         (hitOps || hitBlocks || hitEdges || hitPhis || hitCalls || hitDepth || hitScore);
+  plan.hugeModuleMode = plan.largeModuleMode && hugeModeEnabled && (hitHugeOps || hitHugeScore);
+  plan.backendFastMode = plan.hugeModuleMode;
   plan.useArmBackend = opts.arm;
   plan.useRvBackend = opts.rv;
+
+  if (plan.aggressive && plan.useArmBackend) {
+    plan.armTimeoutSafeMode = getenvEnabled("SISY_ARM_O2_TIMEOUT_SAFE", true);
+    if (plan.armTimeoutSafeMode) {
+      plan.armRegAllocCallPenalty = getenvPositive("SISY_ARM_RA_CALL_PENALTY", 224, 64, 4096);
+      plan.armRegAllocLoopBoost = getenvPositive("SISY_ARM_RA_LOOP_BOOST", 3, 1, 16);
+      plan.armRegAllocPreferBudget = getenvPositive("SISY_ARM_RA_PREFER_BUDGET", 2048, 64, 10000000);
+    }
+  }
+
+  const bool armTightenEnabled = plan.aggressive && plan.useArmBackend &&
+                                 getenvEnabled("SISY_ARM_O2_LARGE_TIGHTEN", true);
+  if (armTightenEnabled) {
+    const size_t armOpThreshold = (size_t) getenvPositive("SISY_ARM_O2_LARGE_THRESHOLD_OPS", 1200, 1000, 2000000);
+    const size_t armBlockThreshold = (size_t) getenvPositive("SISY_ARM_O2_LARGE_THRESHOLD_BLOCKS", 150, 10, 2000000);
+    const size_t armEdgeThreshold = (size_t) getenvPositive("SISY_ARM_O2_LARGE_THRESHOLD_CFG_EDGES", 7000, 100, 5000000);
+    const size_t armPhiThreshold = (size_t) getenvPositive("SISY_ARM_O2_LARGE_THRESHOLD_PHIS", 180, 1, 2000000);
+    const size_t armCallThreshold = (size_t) getenvPositive("SISY_ARM_O2_LARGE_THRESHOLD_CALLS", 28, 1, 2000000);
+    const int armDepthThreshold = getenvPositive("SISY_ARM_O2_LARGE_THRESHOLD_LOOP_DEPTH", 6, 1, 256);
+    const size_t armScoreThreshold = (size_t) getenvPositive("SISY_ARM_O2_LARGE_THRESHOLD_SCORE", 7000, 100, 5000000);
+    const bool armLargeHit =
+      plan.metrics.moduleOpCount >= armOpThreshold ||
+      plan.metrics.blockCount >= armBlockThreshold ||
+      plan.metrics.cfgEdgeCount >= armEdgeThreshold ||
+      plan.metrics.phiCount >= armPhiThreshold ||
+      plan.metrics.callLikeCount >= armCallThreshold ||
+      plan.metrics.maxLoopDepth >= armDepthThreshold ||
+      score >= armScoreThreshold;
+    if (armLargeHit)
+      plan.largeModuleMode = true;
+
+    const size_t armHugeOpThreshold = (size_t) getenvPositive("SISY_ARM_O2_HUGE_THRESHOLD_OPS", 26000, 1000, 4000000);
+    const size_t armHugeScoreThreshold = (size_t) getenvPositive("SISY_ARM_O2_HUGE_THRESHOLD_SCORE", 30000, 1000, 8000000);
+    const bool armHugeHit =
+      plan.metrics.moduleOpCount >= armHugeOpThreshold || score >= armHugeScoreThreshold;
+    if (plan.largeModuleMode && armHugeHit)
+      plan.hugeModuleMode = true;
+  }
+  plan.backendFastMode = plan.hugeModuleMode;
+  if (plan.aggressive && plan.useArmBackend) {
+    // ARM O2 prioritizes runtime pass-rate. Keep huge-function fast-regalloc
+    // opt-in so we don't trade runtime for compile-time by default.
+    const bool armForceBackendFast = getenvEnabled("SISY_ARM_O2_BACKEND_FAST", false);
+    const bool armBackendFastOnLarge = getenvEnabled("SISY_ARM_O2_BACKEND_FAST_LARGE", false);
+    plan.backendFastMode = armForceBackendFast || (armBackendFastOnLarge && plan.largeModuleMode);
+  }
+
+  // RISC-V huge modules are currently stabilized by the O1 midend lane.
+  // Keep O2 CLI compatibility while avoiding known huge-O2 wrong-code regressions.
+  if (plan.aggressive && plan.useRvBackend && plan.hugeModuleMode) {
+    plan.coreProfile = CoreProfile::O1;
+    plan.aggressive = false;
+    plan.enableO2Experimental = false;
+    plan.enableO2Heavy = false;
+    plan.backendFastMode = false;
+  }
+  // Many-params functions are correctness-sensitive in O2 economy/fast lanes.
+  // Keep full stable mid-end/back-end handling when parameter pressure is high.
+  if (plan.aggressive && highParamPressure) {
+    plan.largeModuleMode = false;
+    plan.hugeModuleMode = false;
+    plan.backendFastMode = false;
+  }
+  plan.armInstCombineRounds = plan.backendFastMode ? 1 : -1;
+  if (plan.armTimeoutSafeMode && !plan.backendFastMode) {
+    plan.armInstCombineRounds = getenvPositive("SISY_ARM_O2_TIMEOUT_SAFE_INSTCOMBINE_ROUNDS", 2, 1, 8);
+  }
+  if (plan.armTimeoutSafeMode) {
+    int defaultPeepholeRounds = plan.backendFastMode ? 1 : 2;
+    plan.armPeepholeRounds =
+      getenvPositive("SISY_ARM_O2_TIMEOUT_SAFE_PEEPHOLE_ROUNDS", defaultPeepholeRounds, 1, 16);
+  } else {
+    plan.armPeepholeRounds = plan.backendFastMode ? 1 : -1;
+  }
   return plan;
 }
 
@@ -349,9 +470,9 @@ PipelinePlan configurePipeline(PassManager &pm, const Options &opts, PipelineMet
   }
 
   if (plan.useArmBackend)
-    appendArmBackend(pm, opts);
+    appendArmBackend(pm, opts, plan);
   if (plan.useRvBackend)
-    appendRvBackend(pm, opts);
+    appendRvBackend(pm, opts, plan);
   return plan;
 }
 
@@ -361,12 +482,26 @@ std::string formatPlan(const PipelinePlan &plan) {
       << ", core=" << coreProfileName(plan.coreProfile)
       << ", aggressive=" << (plan.aggressive ? "1" : "0")
       << ", module_ops=" << plan.metrics.moduleOpCount
+      << ", blocks=" << plan.metrics.blockCount
       << ", cfg_edges=" << plan.metrics.cfgEdgeCount
+      << ", phis=" << plan.metrics.phiCount
+      << ", call_like=" << plan.metrics.callLikeCount
+      << ", getarg=" << plan.metrics.getArgCount
+      << ", max_getarg_arity=" << plan.metrics.maxGetArgArity
       << ", loop_depth=" << plan.metrics.maxLoopDepth
+      << ", complexity_score=" << complexityScore(plan.metrics)
       << ", large_module_mode=" << (plan.largeModuleMode ? "1" : "0")
+      << ", huge_module_mode=" << (plan.hugeModuleMode ? "1" : "0")
+      << ", backend_fast_mode=" << (plan.backendFastMode ? "1" : "0")
       << ", o2_experimental=" << (plan.enableO2Experimental ? "1" : "0")
       << ", o2_heavy=" << (plan.enableO2Heavy ? "1" : "0")
       << ", o2_loop_rounds=" << plan.o2LoopRounds
+      << ", arm_timeout_safe=" << (plan.armTimeoutSafeMode ? "1" : "0")
+      << ", arm_instcombine_rounds=" << plan.armInstCombineRounds
+      << ", arm_peephole_rounds=" << plan.armPeepholeRounds
+      << ", arm_ra_call_penalty=" << plan.armRegAllocCallPenalty
+      << ", arm_ra_loop_boost=" << plan.armRegAllocLoopBoost
+      << ", arm_ra_prefer_budget=" << plan.armRegAllocPreferBudget
       << ", backend=[";
   bool first = true;
   if (plan.useArmBackend) {

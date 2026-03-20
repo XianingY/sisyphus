@@ -46,6 +46,7 @@ public:
 class RegAlloc : public Pass {
   int spilled = 0;
   int convertedTotal = 0;
+  bool fastMode;
 
   std::map<FuncOp*, std::set<Reg>> usedRegisters;
   std::map<std::string, FuncOp*> fnMap;
@@ -56,7 +57,7 @@ class RegAlloc : public Pass {
   int latePeephole(Op *funcOp);
   void tidyup(Region *region);
 public:
-  RegAlloc(ModuleOp *module): Pass(module) {}
+  RegAlloc(ModuleOp *module, bool fastMode = false): Pass(module), fastMode(fastMode) {}
 
   std::string name() override { return "rv-regalloc"; };
   std::map<std::string, int> stats() override;

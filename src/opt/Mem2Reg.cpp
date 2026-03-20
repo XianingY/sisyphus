@@ -12,6 +12,47 @@ std::map<std::string, int> Mem2Reg::stats() {
   };
 }
 
+namespace {
+
+bool hasTerminator(BasicBlock *bb) {
+  if (!bb || bb->getOpCount() == 0)
+    return false;
+  auto *term = bb->getLastOp();
+  return term && (isa<ReturnOp>(term) || term->has<TargetAttr>() || term->has<ElseAttr>());
+}
+
+bool sanitizeForMem2Reg(Region *region) {
+  if (!region)
+    return false;
+  region->updateDoms();
+  auto *entry = region->getFirstBlock();
+  bool changed = false;
+  bool ok = true;
+
+  for (auto *bb : region->getBlocks()) {
+    if (!bb)
+      continue;
+    if (bb == entry || bb->dominatedBy(entry)) {
+      if (!hasTerminator(bb))
+        ok = false;
+      continue;
+    }
+
+    // Unreachable phis are irrelevant to promotion and can corrupt DF walk.
+    auto phis = bb->getPhis();
+    for (auto *phi : phis) {
+      phi->erase();
+      changed = true;
+    }
+  }
+
+  if (changed)
+    region->updatePreds();
+  return ok;
+}
+
+}
+
 // See explanation at https://longfangsong.github.io/en/mem2reg-made-simple/
 void Mem2Reg::runImpl(FuncOp *func) {
   converted.clear();
@@ -20,6 +61,8 @@ void Mem2Reg::runImpl(FuncOp *func) {
   domtree.clear();
 
   auto region = func->getRegion();
+  if (!sanitizeForMem2Reg(region))
+    return;
   region->updateDoms();
   region->updateDomFront();
   domtree = getDomTree(region);

@@ -73,6 +73,7 @@ static ArmRule rules[] = {
 void InstCombine::run() {
   auto funcs = collectFuncs();
   int folded;
+  int rounds = 0;
   do {
     folded = 0;
     for (auto func : funcs) {
@@ -93,5 +94,8 @@ void InstCombine::run() {
     }
 
     combined += folded;
+    rounds++;
+    if (maxRounds > 0 && rounds >= maxRounds)
+      break;
   } while (folded);
 }

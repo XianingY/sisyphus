@@ -17,13 +17,11 @@ std::map<std::string, int> RangeAwareFold::stats() {
 void removeRange(Region *region);
 
 void RangeAwareFold::run() {
-  EqClass(module).run();
-
   Builder builder;
   auto sameEqClass = [](Op *a, Op *b) -> bool {
     return a && b && a->has<EqClassAttr>() && b->has<EqClassAttr>() && EQCLASS(a) == EQCLASS(b);
   };
-  bool enableEqFold = false;
+  bool enableEqFold = true;
   if (const char *env = std::getenv("SISY_ENABLE_EQCLASS_FOLD"))
     enableEqFold = env[0] && std::strcmp(env, "0") != 0;
 

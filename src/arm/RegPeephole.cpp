@@ -693,9 +693,13 @@ void RegAlloc::tidyup(Region *region) {
   region->updatePreds();
 
   int converted;
+  int rounds = 0;
   do {
     converted = latePeephole(funcOp);
     convertedTotal += converted;
+    rounds++;
+    if (peepholeRounds > 0 && rounds >= peepholeRounds)
+      break;
   } while (converted);
 
   // Replace blocks with only a single `j` as terminator.

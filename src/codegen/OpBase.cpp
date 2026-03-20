@@ -690,11 +690,14 @@ void Region::updateDoms() {
     }
 
     bsdom[sdom[bb]].push_back(bb);
-    link(parents[bb], bb);
+    auto parent = parents.count(bb) ? parents[bb] : nullptr;
+    if (!parent)
+      continue;
+    link(parent, bb);
 
-    for (auto v : bsdom[parents[bb]]) {
+    for (auto v : bsdom[parent]) {
       find(v);
-      v->idom = sdom[best[v]] == sdom[v] ? parents[bb] : best[v];
+      v->idom = sdom[best[v]] == sdom[v] ? parent : best[v];
     }
   }
 
@@ -717,13 +720,22 @@ void Region::updateDomFront() {
   // For each block, if it has at least 2 preds, then it must be at dominance frontier of all its `preds`,
   // till its `idom`.
   for (auto bb : bbs) {
+    if (!dfn.count(bb))
+      continue;
+    if (!bb->idom)
+      continue;
     if (bb->preds.size() < 2)
       continue;
 
     for (auto pred : bb->preds) {
+      if (!pred || !dfn.count(pred))
+        continue;
       auto runner = pred;
-      while (runner != bb->idom) {
+      int guard = (int) bbs.size() + 2;
+      while (runner && runner != bb->idom && guard-- > 0) {
         runner->domFront.insert(bb);
+        if (runner->idom == runner)
+          break;
         runner = runner->idom;
       }
     }

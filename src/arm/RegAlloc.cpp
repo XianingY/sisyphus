@@ -286,6 +286,10 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
   auto bbWeight = sys::backend::shared::computeBlockHotness(region, [](Op *op) {
     return isa<BlOp>(op) || isa<CloneOp>(op) || isa<JoinOp>(op);
   });
+  const int callPenaltyWeight = std::max(64, callPenalty);
+  const int crossCallRiskThreshold = loopHotBoost > 1 ? 0 : 1;
+  const bool limitPrefer = preferBudget >= 0;
+  int preferCount = 0;
 
   std::unordered_map<Op*, int> spillOffset;
   int currentOffset = STACKOFF(funcOp);
@@ -306,6 +310,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
   int currentPriority = 2;
   for (auto bb : region->getBlocks()) {
     int localWeight = bbWeight[bb];
+    if (localWeight > 1 && loopHotBoost > 1)
+      localWeight *= loopHotBoost;
     auto bumpPriority = [&](Op *x, int v) {
       auto it = priority.find(x);
       if (it == priority.end() || it->second < v)
@@ -346,8 +352,10 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
         priority[op] = currentPriority + 1;
         for (auto x : op->getOperands()) {
           priority[x.defining] = currentPriority;
-          if (!fastMode)
+          if (!fastMode && (!limitPrefer || preferCount < preferBudget)) {
             prefer[x.defining] = op;
+            preferCount++;
+          }
           phiOperand[op].push_back(x.defining);
         }
         currentPriority += 2;
@@ -356,7 +364,10 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
       // Preserve copy chains to reduce move pressure after allocation.
       if (!fastMode && (isa<MovROp>(op) || isa<FmovOp>(op)) && op->getOperandCount() == 1) {
         auto src = op->DEF(0);
-        prefer[op] = src;
+        if (!limitPrefer || preferCount < preferBudget) {
+          prefer[op] = src;
+          preferCount++;
+        }
         bumpPriority(op, currentPriority + 2);
         bumpPriority(src, currentPriority + 1);
       }
@@ -390,7 +401,7 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
         int r = std::min<int>(ops.size(), last);
         int callCount = callPrefix[r] - callPrefix[l];
         callSpan[op] = std::max(callSpan[op], callCount);
-        spillWeight[op] += 128LL * localWeight * callCount;
+        spillWeight[op] += (long long) callPenaltyWeight * localWeight * callCount;
       }
     }
 
@@ -507,7 +518,8 @@ void RegAlloc::runImpl(Region *region, bool isLeaf) {
         if (!isAllocatable(preferredReg, fpreg(op->getResultType())))
           goto skip_prefer_assign;
         bool crossCallRisk =
-          (callSpan[op] > 1 || callSpan[ref] > 1) && callerSaved.count(preferredReg);
+          (callSpan[op] > crossCallRiskThreshold || callSpan[ref] > crossCallRiskThreshold) &&
+          callerSaved.count(preferredReg);
         if (!crossCallRisk) {
           assignment[op] = preferredReg;
           continue;

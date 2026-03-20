@@ -64,6 +64,10 @@ bool isArrayLike(const SymbolInfo &sym) {
   return !sym.dims.empty() || sym.type == hir::TypeKind::Array || sym.type == hir::TypeKind::Pointer;
 }
 
+bool isMemoryInst(const Inst &inst) {
+  return inst.kind == OpKind::Load || inst.kind == OpKind::Store;
+}
+
 bool visitHIR(const hir::Op *op, std::vector<std::string> &errors) {
   if (!op)
     return true;
@@ -149,7 +153,7 @@ bool verifyCFGLegalSet(const Module &module, std::vector<std::string> &errors) {
           errors.push_back("cfg legality: illegal inst kind in func @" + func.name);
           ok = false;
         }
-        if (inst.kind == OpKind::Load || inst.kind == OpKind::Store) {
+        if (isMemoryInst(inst)) {
           if (inst.symbol.empty()) {
             errors.push_back("cfg legality: empty memory symbol in func @" + func.name);
             ok = false;
@@ -163,8 +167,20 @@ bool verifyCFGLegalSet(const Module &module, std::vector<std::string> &errors) {
           }
 
           bool indexed = inst.kind == OpKind::Load ? !inst.args.empty() : inst.args.size() > 1;
+          size_t indexCount = indexed ? (inst.kind == OpKind::Load ? inst.args.size() : inst.args.size() - 1) : 0;
+          if (inst.accessRank != (int) indexCount) {
+            errors.push_back("cfg legality: access rank mismatch for '" + inst.symbol + "' in func @" + func.name);
+            ok = false;
+          }
+          if (inst.baseKind != it->second.baseKind && inst.baseKind != MemoryBaseKind::Unknown) {
+            errors.push_back("cfg legality: memory base kind mismatch for '" + inst.symbol + "' in func @" + func.name);
+            ok = false;
+          }
+          if (!inst.strideBytes.empty() && inst.strideBytes.size() < indexCount) {
+            errors.push_back("cfg legality: insufficient stride info for '" + inst.symbol + "' in func @" + func.name);
+            ok = false;
+          }
           if (indexed && isArrayLike(it->second)) {
-            size_t indexCount = inst.kind == OpKind::Load ? inst.args.size() : inst.args.size() - 1;
             if (!it->second.dims.empty() && indexCount > it->second.dims.size()) {
               errors.push_back("cfg legality: too many indices for '" + inst.symbol + "' in func @" + func.name);
               ok = false;
@@ -182,10 +198,29 @@ bool verifyCFGLegalSet(const Module &module, std::vector<std::string> &errors) {
               errors.push_back("cfg legality: indexed memory type mismatch for '" + inst.symbol + "' in func @" + func.name);
               ok = false;
             }
+            if (partialLoad != inst.producesAddress) {
+              errors.push_back("cfg legality: address/result mode mismatch for '" + inst.symbol + "' in func @" + func.name);
+              ok = false;
+            }
             if (expectedSize && inst.memSize && inst.memSize != expectedSize) {
               errors.push_back("cfg legality: indexed memory size mismatch for '" + inst.symbol + "' in func @" + func.name);
               ok = false;
             }
+            bool flattenedScalarIndex = indexCount == 1 && it->second.dims.size() > 1 && !inst.producesAddress;
+            if (!flattenedScalarIndex && !inst.strideBytes.empty()) {
+              size_t usable = std::min(indexCount, it->second.strideBytes.size());
+              for (size_t i = 0; i < usable; i++) {
+                if (inst.strideBytes[i] != it->second.strideBytes[i]) {
+                  errors.push_back("cfg legality: stride mismatch for '" + inst.symbol + "' in func @" + func.name);
+                  ok = false;
+                  break;
+                }
+              }
+            }
+          } else if (!indexed && inst.producesAddress &&
+                     !(it->second.type == hir::TypeKind::Array || it->second.type == hir::TypeKind::Pointer)) {
+            errors.push_back("cfg legality: scalar memory op unexpectedly produces address for '" + inst.symbol + "' in func @" + func.name);
+            ok = false;
           }
         }
       }

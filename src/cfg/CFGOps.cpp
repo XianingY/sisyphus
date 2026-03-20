@@ -24,18 +24,42 @@ const char *typeName(hir::TypeKind kind) {
   return "unknown";
 }
 
+const char *memoryBaseName(MemoryBaseKind kind) {
+  switch (kind) {
+  case MemoryBaseKind::Unknown:
+    return "unknown";
+  case MemoryBaseKind::Global:
+    return "global";
+  case MemoryBaseKind::Local:
+    return "local";
+  case MemoryBaseKind::Param:
+    return "param";
+  }
+  return "unknown";
+}
+
 void dumpSymbol(const SymbolInfo &sym, std::ostream &os, int depth, const char *prefix) {
   for (int i = 0; i < depth; i++)
     os << "  ";
   os << prefix << " \"" << sym.name << "\" type=" << typeName(sym.type)
      << " elem=" << typeName(sym.elementType)
-     << " bytes=" << sym.storageSize;
+     << " bytes=" << sym.storageSize
+     << " base=" << memoryBaseName(sym.baseKind);
   if (!sym.dims.empty()) {
     os << " dims=[";
     for (size_t i = 0; i < sym.dims.size(); i++) {
       if (i)
         os << ",";
       os << sym.dims[i];
+    }
+    os << "]";
+  }
+  if (!sym.strideBytes.empty()) {
+    os << " strides=[";
+    for (size_t i = 0; i < sym.strideBytes.size(); i++) {
+      if (i)
+        os << ",";
+      os << sym.strideBytes[i];
     }
     os << "]";
   }
@@ -97,6 +121,20 @@ void dump(const Module &module, std::ostream &os) {
           os << " \"" << inst.symbol << "\"";
         if (inst.memSize)
           os << " <size=" << inst.memSize << ">";
+        if (inst.kind == OpKind::Load || inst.kind == OpKind::Store) {
+          os << " <base=" << memoryBaseName(inst.baseKind)
+             << ",rank=" << inst.accessRank
+             << ",addr=" << (inst.producesAddress ? "1" : "0") << ">";
+          if (!inst.strideBytes.empty()) {
+            os << " strides=[";
+            for (size_t i = 0; i < inst.strideBytes.size(); i++) {
+              if (i)
+                os << ",";
+              os << inst.strideBytes[i];
+            }
+            os << "]";
+          }
+        }
         if (!inst.args.empty()) {
           os << " [";
           for (size_t i = 0; i < inst.args.size(); i++) {

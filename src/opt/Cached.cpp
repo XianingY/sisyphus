@@ -19,6 +19,7 @@ void Cached::run() {
   for (auto func : funcs) {
     if (!isRecursive(func) || func->has<ImpureAttr>())
       continue;
+    bool eligible = true;
 
     const auto &name = NAME(func);
 
@@ -26,9 +27,13 @@ void Cached::run() {
     auto calls = func->findAll<CallOp>();
     for (auto call : calls) {
       // We're calling other functions, and it isn't generally possible to emulate.
-      if (NAME(call) != name)
-        return;
+      if (NAME(call) != name) {
+        eligible = false;
+        break;
+      }
     }
+    if (!eligible)
+      continue;
     
     int argnum = func->get<ArgCountAttr>()->count;
     if (argnum > 3 || argnum <= 1)
@@ -38,14 +43,35 @@ void Cached::run() {
     auto getargs = func->findAll<GetArgOp>();
     std::vector<Op*> args(argnum);
     for (auto getarg : getargs) {
-      if (getarg->getResultType() != Value::i32)
-        return;
-      args[V(getarg)] = getarg;
+      if (getarg->getResultType() != Value::i32) {
+        eligible = false;
+        break;
+      }
+      int idx = V(getarg);
+      if (idx < 0 || idx >= argnum) {
+        eligible = false;
+        break;
+      }
+      args[idx] = getarg;
     }
+    if (!eligible)
+      continue;
+    for (auto *arg : args) {
+      if (!arg) {
+        eligible = false;
+        break;
+      }
+    }
+    if (!eligible)
+      continue;
     
     auto ret = func->findAll<ReturnOp>();
-    if (ret.empty() || ret[0]->DEF()->getResultType() != Value::i32)
-      return;
+    if (ret.empty())
+      continue;
+    if (ret[0]->getOperandCount() == 0 || !ret[0]->DEF())
+      continue;
+    if (ret[0]->DEF()->getResultType() != Value::i32)
+      continue;
 
     // Create a cache.
     using namespace exec;

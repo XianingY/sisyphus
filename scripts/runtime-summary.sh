@@ -4,11 +4,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME_ROOT="${1:-${ROOT_DIR}/tests/.out/runtime}"
 SUMMARY_LABEL="${SUMMARY_LABEL:-sisyphus}"
-SUMMARY_DIR="${ROOT_DIR}/.runtime-reports/summary"
+SUMMARY_DIR_DEFAULT="${ROOT_DIR}/.runtime-reports/summary"
+SUMMARY_DIR="${SUMMARY_DIR:-${SUMMARY_DIR_DEFAULT}}"
 SUMMARY_GATE_OPTS="${SUMMARY_GATE_OPTS:-O1,O2}"
 
-if [[ -d "${ROOT_DIR}/tests/.out/runtime" && -w "${ROOT_DIR}/tests/.out/runtime" ]]; then
+if [[ "${RUNTIME_ROOT}" == "${ROOT_DIR}/tests/.out/runtime" &&
+      -d "${ROOT_DIR}/tests/.out/runtime" && -w "${ROOT_DIR}/tests/.out/runtime" ]]; then
   SUMMARY_DIR="${ROOT_DIR}/tests/.out/runtime/summary"
+fi
+if [[ "${RUNTIME_ROOT}" != "${ROOT_DIR}/tests/.out/runtime" && "${SUMMARY_DIR}" == "${SUMMARY_DIR_DEFAULT}" ]]; then
+  SUMMARY_DIR="${RUNTIME_ROOT}/summary"
 fi
 mkdir -p "${SUMMARY_DIR}"
 
@@ -57,7 +62,7 @@ END {
 printf 'profile,mtime,path\n' >"${SUMMARY_DIR}/latest-index.csv"
 cat "${latest_tmp}" >>"${SUMMARY_DIR}/latest-index.csv"
 
-printf 'profile,suite,target,opt,total,pass,fail,functional_total,functional_pass,functional_fail,perf_total,perf_pass,perf_fail,timeout_count,compile_fail_count,compile_crash_count,link_fail_count,median_ms,p90_ms,pass_rate,sanitized_total,sanitized_pass,sanitized_fail,sanitized_pass_rate,functional_pass_rate,perf_pass_rate,path\n' \
+printf 'profile,suite,target,opt,total,pass,fail,functional_total,functional_pass,functional_fail,perf_total,perf_pass,perf_fail,timeout_count,compile_fail_count,compile_crash_count,link_fail_count,arm_timeout_cluster_fail,semantic_cluster_fail,median_ms,p90_ms,pass_rate,sanitized_total,sanitized_pass,sanitized_fail,sanitized_pass_rate,functional_pass_rate,perf_pass_rate,path\n' \
   >"${SUMMARY_DIR}/overview-by-profile.csv"
 
 calc_quantile_ms() {
@@ -89,7 +94,7 @@ while IFS=, read -r profile mtime path; do
   suite="${rest%-*}"
 
   # shellcheck disable=SC2016
-  read -r total pass fail ftotal fpass ffail ptotal ppass pfail timeout_count compile_fail_count compile_crash_count link_fail_count pass_rate sanitized_total sanitized_pass sanitized_fail sanitized_pass_rate fpass_rate ppass_rate <<EOF
+  read -r total pass fail ftotal fpass ffail ptotal ppass pfail timeout_count compile_fail_count compile_crash_count link_fail_count arm_timeout_cluster_fail semantic_cluster_fail pass_rate sanitized_total sanitized_pass sanitized_fail sanitized_pass_rate fpass_rate ppass_rate <<EOF
 $(awk -F, '
 BEGIN {
   total=0; pass=0; fail=0;
@@ -100,6 +105,8 @@ BEGIN {
   compile_fail_count=0;
   compile_crash_count=0;
   link_fail_count=0;
+  arm_timeout_cluster_fail=0;
+  semantic_cluster_fail=0;
 }
 NR == 1 { next }
 {
@@ -111,6 +118,12 @@ NR == 1 { next }
   if ($6 == "compile_fail") compile_fail_count++;
   if ($6 == "compile_crash") compile_crash_count++;
   if ($6 == "link_fail") link_fail_count++;
+  if (!is_pass) {
+    if ($2 == "03_sort2" || $2 ~ /^h-1-/ || $2 == "h-11-01" || $2 == "h-14-01" || $2 ~ /^performance\/2025-/)
+      arm_timeout_cluster_fail++;
+    if ($2 == "if-combine2" || $2 == "if-combine3" || $2 == "h-7-01" || $2 == "fft0")
+      semantic_cluster_fail++;
+  }
   is_suspect = (NF >= 22 && $22 == "1");
   if (!is_suspect) {
     sanitized_total++;
@@ -130,9 +143,9 @@ END {
   sanitized_pass_rate = (sanitized_total == 0 ? 0 : sanitized_pass / sanitized_total);
   fpass_rate = (ftotal == 0 ? 0 : fpass / ftotal);
   ppass_rate = (ptotal == 0 ? 0 : ppass / ptotal);
-  printf "%d %d %d %d %d %d %d %d %d %d %d %d %d %.6f %d %d %d %.6f %.6f %.6f\n",
+  printf "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %.6f %d %d %d %.6f %.6f %.6f\n",
     total, pass, fail, ftotal, fpass, ffail, ptotal, ppass, pfail, timeout_count,
-    compile_fail_count, compile_crash_count, link_fail_count,
+    compile_fail_count, compile_crash_count, link_fail_count, arm_timeout_cluster_fail, semantic_cluster_fail,
     pass_rate, sanitized_total, sanitized_pass, sanitized_fail, sanitized_pass_rate, fpass_rate, ppass_rate;
 }
 ' "${path}")
@@ -159,11 +172,12 @@ EOF
     link_fail_total=$((link_fail_total + link_fail_count))
   fi
 
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%.3f,%.3f,%.6f,%s,%s,%s,%.6f,%.6f,%.6f,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%.3f,%.3f,%.6f,%s,%s,%s,%.6f,%.6f,%.6f,%s\n' \
     "${profile}" "${suite}" "${target}" "${opt}" \
     "${total}" "${pass}" "${fail}" "${ftotal}" "${fpass}" "${ffail}" \
     "${ptotal}" "${ppass}" "${pfail}" "${timeout_count}" \
     "${compile_fail_count}" "${compile_crash_count}" "${link_fail_count}" \
+    "${arm_timeout_cluster_fail}" "${semantic_cluster_fail}" \
     "${median_ms}" "${p90_ms}" \
     "${pass_rate}" "${sanitized_total}" "${sanitized_pass}" "${sanitized_fail}" \
     "${sanitized_pass_rate}" "${fpass_rate}" "${ppass_rate}" "${path}" \
@@ -177,6 +191,14 @@ EOF
   out_timeout="${SUMMARY_DIR}/timeouts-${profile}.txt"
   awk -F, 'NR > 1 && $6 == "timeout" { printf "%s status=%s pass=%s median=%s log=%s\n", $2, $6, $8, $9, $16 }' "${path}" \
     >"${out_timeout}"
+
+  out_arm_timeout_cluster="${SUMMARY_DIR}/cluster-arm-timeout-${profile}.txt"
+  awk -F, 'NR > 1 && $8 != "1" && ($2 == "03_sort2" || $2 ~ /^h-1-/ || $2 == "h-11-01" || $2 == "h-14-01" || $2 ~ /^performance\/2025-/) { printf "%s status=%s compare=%s median=%s log=%s\n", $2, $6, $7, $9, $16 }' "${path}" \
+    >"${out_arm_timeout_cluster}"
+
+  out_semantic_cluster="${SUMMARY_DIR}/cluster-semantic-${profile}.txt"
+  awk -F, 'NR > 1 && $8 != "1" && ($2 == "if-combine2" || $2 == "if-combine3" || $2 == "h-7-01" || $2 == "fft0") { printf "%s status=%s compare=%s median=%s log=%s\n", $2, $6, $7, $9, $16 }' "${path}" \
+    >"${out_semantic_cluster}"
 
   out_stage_fail="${SUMMARY_DIR}/stage-failures-${profile}.txt"
   awk -F, 'NR > 1 && ($6 == "compile_fail" || $6 == "compile_crash" || $6 == "link_fail") { printf "%s status=%s pass=%s log=%s\n", $2, $6, $8, $16 }' "${path}" \
@@ -242,6 +264,7 @@ fi
 echo "summary dir: ${SUMMARY_DIR}"
 echo "latest index: ${SUMMARY_DIR}/latest-index.csv"
 echo "overview: ${SUMMARY_DIR}/overview-by-profile.csv"
+echo "cluster reports: ${SUMMARY_DIR}/cluster-arm-timeout-*.txt, ${SUMMARY_DIR}/cluster-semantic-*.txt"
 echo "regressed top20: ${SUMMARY_DIR}/o2-vs-o1-regressed-top20.csv"
 echo "gate status: ${status_file}"
 

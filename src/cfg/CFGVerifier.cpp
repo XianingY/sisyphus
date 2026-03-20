@@ -25,6 +25,10 @@ bool isIntLikeToken(const std::string &token, const std::unordered_set<std::stri
   return intValues.count(token);
 }
 
+bool isMemoryInst(const Inst &inst) {
+  return inst.kind == OpKind::Load || inst.kind == OpKind::Store;
+}
+
 }  // namespace
 
 bool verify(const Module &module, std::vector<std::string> &errors) {
@@ -73,8 +77,30 @@ bool verify(const Module &module, std::vector<std::string> &errors) {
           errors.push_back("cfg verifier: phi must appear before non-phi at " + where(func, bid));
           ok = false;
         }
-        if ((inst.kind == OpKind::Load || inst.kind == OpKind::Store) && inst.memSize == 0) {
+        if (isMemoryInst(inst) && inst.memSize == 0) {
           errors.push_back("cfg verifier: load/store missing mem size at " + where(func, bid));
+          ok = false;
+        }
+        if (isMemoryInst(inst) && inst.baseKind == MemoryBaseKind::Unknown) {
+          errors.push_back("cfg verifier: load/store missing memory base kind at " + where(func, bid));
+          ok = false;
+        }
+        if (isMemoryInst(inst) && inst.accessRank < 0) {
+          errors.push_back("cfg verifier: negative memory access rank at " + where(func, bid));
+          ok = false;
+        }
+        if (isMemoryInst(inst) && !inst.strideBytes.empty() &&
+            inst.accessRank > (int) inst.strideBytes.size()) {
+          errors.push_back("cfg verifier: memory stride vector shorter than access rank at " + where(func, bid));
+          ok = false;
+        }
+        if (inst.kind == OpKind::Store && inst.producesAddress) {
+          errors.push_back("cfg verifier: store must not produce address at " + where(func, bid));
+          ok = false;
+        }
+        if (inst.kind == OpKind::Load && inst.producesAddress &&
+            !(inst.type == hir::TypeKind::Pointer || inst.type == hir::TypeKind::Array)) {
+          errors.push_back("cfg verifier: address-producing load must return pointer-like type at " + where(func, bid));
           ok = false;
         }
         if (inst.kind == OpKind::Call && inst.calleeArgTypes.size() != inst.args.size()) {

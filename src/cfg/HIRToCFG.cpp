@@ -84,6 +84,19 @@ std::vector<int> typeDims(Type *ty) {
   return {};
 }
 
+std::vector<size_t> computeStrideBytes(const std::vector<int> &dims, size_t elemSize) {
+  if (dims.empty())
+    return {};
+  std::vector<size_t> strides(dims.size(), elemSize ? elemSize : 4);
+  for (size_t i = 0; i < dims.size(); i++) {
+    size_t stride = elemSize ? elemSize : 4;
+    for (size_t j = i + 1; j < dims.size(); j++)
+      stride *= (size_t) std::max(dims[j], 1);
+    strides[i] = stride;
+  }
+  return strides;
+}
+
 SymbolInfo buildSymbolInfo(const std::string &name, Type *ty, bool isGlobal, bool isParam, bool isMutable) {
   SymbolInfo info;
   info.name = name;
@@ -93,6 +106,7 @@ SymbolInfo buildSymbolInfo(const std::string &name, Type *ty, bool isGlobal, boo
   info.isGlobal = isGlobal;
   info.isParam = isParam;
   info.isMutable = isMutable;
+  info.baseKind = isGlobal ? MemoryBaseKind::Global : (isParam ? MemoryBaseKind::Param : MemoryBaseKind::Local);
   info.elemSize = 4;
   if (info.elementType == hir::TypeKind::Float || info.elementType == hir::TypeKind::Int)
     info.elemSize = 4;
@@ -101,6 +115,7 @@ SymbolInfo buildSymbolInfo(const std::string &name, Type *ty, bool isGlobal, boo
   info.storageSize = typeSize(ty);
   if (info.storageSize == 0)
     info.storageSize = (info.type == hir::TypeKind::Pointer || info.type == hir::TypeKind::Array) ? 8 : 4;
+  info.strideBytes = computeStrideBytes(info.dims, info.elemSize);
   return info;
 }
 
@@ -447,11 +462,13 @@ private:
       if (it != symbols.end()) {
         inst.elementType = it->second.elementType;
         bool indexed = !op->children.empty();
+        attachMemorySemantics(inst, &it->second, op->children.size());
         if (indexed) {
           bool partialIndex = !it->second.dims.empty() && op->children.size() < it->second.dims.size();
           if (partialIndex) {
             inst.type = hir::TypeKind::Pointer;
             inst.memSize = 8;
+            inst.producesAddress = true;
           } else {
             inst.type = it->second.elementType;
             inst.memSize = it->second.elemSize;
@@ -459,6 +476,7 @@ private:
         } else if (it->second.type == hir::TypeKind::Array || it->second.type == hir::TypeKind::Pointer) {
           inst.type = hir::TypeKind::Pointer;
           inst.memSize = 8;
+          inst.producesAddress = true;
         } else {
           inst.memSize = std::max((size_t) 4, it->second.storageSize);
         }
@@ -554,6 +572,23 @@ private:
 
   static std::string defaultToken(hir::TypeKind type) {
     return type == hir::TypeKind::Float ? "f#0.0" : "#0";
+  }
+
+  void attachMemorySemantics(Inst &inst, const SymbolInfo *sym, size_t indexCount, bool flattenedLinearIndex = false) {
+    if (!sym)
+      return;
+    inst.baseKind = sym->baseKind;
+    inst.accessRank = (int) indexCount;
+    inst.strideBytes.clear();
+    if (indexCount == 0)
+      return;
+    if (flattenedLinearIndex) {
+      size_t elemSize = sym->elemSize ? sym->elemSize : 4;
+      inst.strideBytes.push_back(elemSize);
+      return;
+    }
+    size_t usable = std::min(indexCount, sym->strideBytes.size());
+    inst.strideBytes.insert(inst.strideBytes.end(), sym->strideBytes.begin(), sym->strideBytes.begin() + usable);
   }
 
   std::string lowerASTExpr(ASTNode *node, hir::TypeKind fallbackType, Func &func,
@@ -663,6 +698,7 @@ private:
         zstore.args = { "#" + std::to_string(i), defaultToken(it->second.elementType) };
         zstore.type = it->second.elementType;
         zstore.memSize = elemSize;
+        attachMemorySemantics(zstore, &it->second, 1, /*flattenedLinearIndex=*/ true);
         emit(func, cur, zstore);
       }
       addStoreSym(stores, symbol);
@@ -707,6 +743,7 @@ private:
       zstore.args = { idxPhi, defaultToken(it->second.elementType) };
       zstore.type = it->second.elementType;
       zstore.memSize = elemSize;
+      attachMemorySemantics(zstore, &it->second, 1, /*flattenedLinearIndex=*/ true);
       emit(func, bodyId, zstore);
 
       Inst add;
@@ -737,6 +774,7 @@ private:
       store.args = { "#" + std::to_string(i), token };
       store.type = it->second.elementType;
       store.memSize = elemSize;
+      attachMemorySemantics(store, &it->second, 1, /*flattenedLinearIndex=*/ true);
       emit(func, cur, store);
       addStoreSym(stores, symbol);
     }
@@ -779,6 +817,7 @@ private:
         if (it != symbols.end()) {
           store.type = it->second.type;
           store.memSize = std::max((size_t) 4, it->second.storageSize);
+          attachMemorySemantics(store, &it->second, 0);
         }
         emit(func, cur, store);
         addStoreSym(stores, sym);
@@ -799,6 +838,7 @@ private:
         bool indexed = store.args.size() > 1;
         store.type = indexed ? it->second.elementType : it->second.type;
         store.memSize = indexed ? it->second.elemSize : std::max((size_t) 4, it->second.storageSize);
+        attachMemorySemantics(store, &it->second, indexed ? store.args.size() - 1 : 0);
       }
       emit(func, cur, store);
       addStoreSym(stores, store.symbol);

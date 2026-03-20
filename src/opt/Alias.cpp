@@ -1,10 +1,85 @@
 #include "Analysis.h"
 
+#include <optional>
+#include <unordered_map>
+#include <unordered_set>
+
 using namespace sys;
 
-static void postorder(BasicBlock *current, DomTree &tree, std::vector<BasicBlock*> &order) {
+namespace {
+
+int clampToInt(long long v) {
+  if (v > INT_MAX)
+    return INT_MAX;
+  if (v < INT_MIN)
+    return INT_MIN;
+  return (int) v;
+}
+
+std::optional<long long> evalConstIntExpr(Op *op,
+                                          std::unordered_map<Op*, std::optional<long long>> &memo,
+                                          std::unordered_set<Op*> &visiting) {
+  if (!op)
+    return std::nullopt;
+  if (memo.count(op))
+    return memo[op];
+  if (visiting.count(op))
+    return std::nullopt;
+  visiting.insert(op);
+
+  std::optional<long long> value;
+  if (isa<IntOp>(op))
+    value = V(op);
+  else if (isa<MinusOp>(op)) {
+    auto x = evalConstIntExpr(op->DEF(), memo, visiting);
+    if (x)
+      value = -*x;
+  } else if (isa<AddIOp>(op) || isa<SubIOp>(op) || isa<MulIOp>(op)) {
+    auto x = evalConstIntExpr(op->DEF(0), memo, visiting);
+    auto y = evalConstIntExpr(op->DEF(1), memo, visiting);
+    if (x && y) {
+      if (isa<AddIOp>(op))
+        value = *x + *y;
+      else if (isa<SubIOp>(op))
+        value = *x - *y;
+      else
+        value = *x * *y;
+    }
+  } else if (isa<PhiOp>(op) && op->getOperandCount() > 0) {
+    auto first = evalConstIntExpr(op->DEF(0), memo, visiting);
+    if (first) {
+      bool same = true;
+      for (int i = 1; i < op->getOperandCount(); i++) {
+        auto c = evalConstIntExpr(op->DEF(i), memo, visiting);
+        if (!c || *c != *first) {
+          same = false;
+          break;
+        }
+      }
+      if (same)
+        value = first;
+    }
+  }
+
+  visiting.erase(op);
+  memo[op] = value;
+  return value;
+}
+
+}
+
+static void postorder(BasicBlock *current,
+                      DomTree &tree,
+                      std::vector<BasicBlock*> &order,
+                      std::unordered_set<BasicBlock*> &visiting,
+                      std::unordered_set<BasicBlock*> &visited) {
+  if (!current || visited.count(current) || visiting.count(current))
+    return;
+  visiting.insert(current);
   for (auto bb : tree[current])
-    postorder(bb, tree, order);
+    postorder(bb, tree, order, visiting, visited);
+  visiting.erase(current);
+  visited.insert(current);
   order.push_back(current);
 }
 
@@ -16,12 +91,16 @@ void Alias::runImpl(Region *region) {
 
   BasicBlock *entry = region->getFirstBlock();
   std::vector<BasicBlock*> rpo;
-  postorder(entry, tree, rpo);
+  std::unordered_set<BasicBlock*> visiting;
+  std::unordered_set<BasicBlock*> visited;
+  postorder(entry, tree, rpo, visiting, visited);
   std::reverse(rpo.begin(), rpo.end());
 
   // Then traverse the CFG in that order.
   // This should guarantee definition comes before all uses.
   for (auto bb : rpo) {
+    std::unordered_map<Op*, std::optional<long long>> constMemo;
+    std::unordered_set<Op*> constVisiting;
     for (auto op : bb->getOps()) {
       if (isa<AllocaOp>(op)) {
         op->remove<AliasAttr>();
@@ -50,8 +129,9 @@ void Alias::runImpl(Region *region) {
         // Now `x` is the address and `y` is the offset. 
         // Note this swap won't affect the original op.
         auto alias = ALIAS(x)->clone();
-        if (isa<IntOp>(y)) {
-          auto delta = V(y);
+        auto constOffset = evalConstIntExpr(y, constMemo, constVisiting);
+        if (constOffset) {
+          auto delta = clampToInt(*constOffset);
           for (auto &[_, offset] : alias->location) {
             for (auto &value : offset) {
               if (value != -1)

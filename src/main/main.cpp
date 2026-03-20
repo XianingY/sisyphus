@@ -20,7 +20,9 @@
 #include "../hir/HIRCanonicalize.h"
 #include "../pass/PassRegistry.h"
 #include "../codegen/Ops.h"
+#include "../codegen/Attrs.h"
 #include "../utils/smt/SMT.h"
+#include "../parse/CompileError.h"
 
 using namespace smt;
 
@@ -182,10 +184,22 @@ int main(int argc, char **argv) {
   ss << ifs.rdbuf() << "\n";
 
   sys::TypeContext ctx;
-
-  sys::Parser parser(ss.str(), ctx);
-  sys::ASTNode *node = parser.parse();
-  sys::Sema sema(node, ctx);
+  sys::ASTNode *node = nullptr;
+  try {
+    sys::Parser parser(ss.str(), ctx);
+    node = parser.parse();
+    sys::Sema sema(node, ctx);
+  } catch (const sys::CompileError &e) {
+    if (node)
+      delete node;
+    std::cerr << e.what() << "\n";
+    return 1;
+  } catch (const std::exception &e) {
+    if (node)
+      delete node;
+    std::cerr << "frontend error: " << e.what() << "\n";
+    return 1;
+  }
 
   std::unique_ptr<sys::CodeGen> cg;
   std::unique_ptr<sys::ModuleOp> loweredModule;
@@ -413,7 +427,19 @@ int main(int argc, char **argv) {
       for (auto *bb : region->getBlocks()) {
         if (!bb)
           continue;
+        metrics.blockCount++;
         for (auto *op : bb->getOps()) {
+          if (sys::isa<sys::PhiOp>(op))
+            metrics.phiCount++;
+          if (sys::isa<sys::GetArgOp>(op)) {
+            metrics.getArgCount++;
+            auto *idx = op->find<sys::IntAttr>();
+            if (idx)
+              metrics.maxGetArgArity = std::max(metrics.maxGetArgArity, idx->value + 1);
+          }
+          if (sys::isa<sys::CallOp>(op) || sys::isa<sys::CloneOp>(op) ||
+              sys::isa<sys::JoinOp>(op))
+            metrics.callLikeCount++;
           if (bb->getOpCount() > 0 && op == bb->getLastOp()) {
             if (sys::isa<sys::BranchOp>(op))
               metrics.cfgEdgeCount += 2;
@@ -425,8 +451,9 @@ int main(int argc, char **argv) {
       }
     };
 
-    for (auto *func : module->findAll<sys::FuncOp>())
+    for (auto *func : module->findAll<sys::FuncOp>()) {
       walkRegion(func->getRegion(), 0);
+    }
   }
 
   if (opts.dumpMidIR) {
@@ -442,6 +469,18 @@ int main(int argc, char **argv) {
       std::cerr << "[pipeline] " << sys::pipeline::formatPlan(plan) << "\n";
       pm.dumpPipelineProfile(std::cerr);
     }
+  }
+  if (opts.dumpPassTiming) {
+    std::cerr << "[pass-timing] budget: large_module_mode=" << (plan.largeModuleMode ? 1 : 0)
+              << ", huge_module_mode=" << (plan.hugeModuleMode ? 1 : 0)
+              << ", backend_fast_mode=" << (plan.backendFastMode ? 1 : 0)
+              << ", arm_timeout_safe=" << (plan.armTimeoutSafeMode ? 1 : 0)
+              << ", arm_instcombine_rounds=" << plan.armInstCombineRounds
+              << ", arm_peephole_rounds=" << plan.armPeepholeRounds
+              << ", arm_ra_call_penalty=" << plan.armRegAllocCallPenalty
+              << ", arm_ra_loop_boost=" << plan.armRegAllocLoopBoost
+              << ", arm_ra_prefer_budget=" << plan.armRegAllocPreferBudget
+              << "\n";
   }
   
   pm.run();

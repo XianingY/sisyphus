@@ -24,11 +24,20 @@ enum class OpKind {
   CondBr,
 };
 
+enum class MemoryBaseKind {
+  Unknown,
+  Global,
+  Local,
+  Param,
+};
+
 struct SymbolInfo {
   std::string name;
   hir::TypeKind type = hir::TypeKind::Unknown;
   hir::TypeKind elementType = hir::TypeKind::Unknown;
   std::vector<int> dims;
+  std::vector<size_t> strideBytes;
+  MemoryBaseKind baseKind = MemoryBaseKind::Unknown;
   bool isGlobal = false;
   bool isParam = false;
   bool isMutable = true;
@@ -50,6 +59,10 @@ struct Inst {
   std::string symbol;
   std::vector<std::string> args;
   size_t memSize = 0;
+  std::vector<size_t> strideBytes;
+  MemoryBaseKind baseKind = MemoryBaseKind::Unknown;
+  int accessRank = 0;
+  bool producesAddress = false;
   hir::TypeKind calleeRetType = hir::TypeKind::Unknown;
   std::vector<hir::TypeKind> calleeArgTypes;
   std::vector<int> targets;

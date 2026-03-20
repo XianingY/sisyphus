@@ -33,8 +33,9 @@ public:
 
 class InstCombine : public Pass {
   int combined = 0;
+  int maxRounds;
 public:
-  InstCombine(ModuleOp *module): Pass(module) {}
+  InstCombine(ModuleOp *module, int maxRounds = -1): Pass(module), maxRounds(maxRounds) {}
 
   std::string name() override { return "arm-inst-combine"; };
   std::map<std::string, int> stats() override;
@@ -60,6 +61,11 @@ public:
 class RegAlloc : public Pass {
   int spilled = 0;
   int convertedTotal = 0;
+  bool fastMode;
+  int callPenalty;
+  int loopHotBoost;
+  int preferBudget;
+  int peepholeRounds;
 
   std::map<FuncOp*, std::set<Reg>> usedRegisters;
   std::map<std::string, FuncOp*> fnMap;
@@ -70,7 +76,18 @@ class RegAlloc : public Pass {
   void tidyup(Region *region);
 public:
 
-  RegAlloc(ModuleOp *module): Pass(module) {}
+  RegAlloc(ModuleOp *module,
+           bool fastMode = false,
+           int callPenalty = 128,
+           int loopHotBoost = 1,
+           int preferBudget = -1,
+           int peepholeRounds = -1):
+    Pass(module),
+    fastMode(fastMode),
+    callPenalty(callPenalty),
+    loopHotBoost(loopHotBoost),
+    preferBudget(preferBudget),
+    peepholeRounds(peepholeRounds) {}
 
   std::string name() override { return "arm-regalloc"; };
   std::map<std::string, int> stats() override;
