@@ -54,7 +54,7 @@ void PassManager::run() {
   bool compareEveryPass = false;
   if (const char *env = std::getenv("SISY_COMPARE_EACH_PASS"))
     compareEveryPass = env[0] && std::strcmp(env, "0") != 0;
-  size_t compareStepLimit = 800000000;
+  size_t compareStepLimit = 5000000000;
   if (const char *env = std::getenv("SISY_COMPARE_STEP_LIMIT")) {
     long long parsed = std::atoll(env);
     if (parsed > 0)

@@ -324,7 +324,11 @@ void Interpreter::exec(Op *op) {
 
 Interpreter::Value Interpreter::applyExtern(const std::string &name, const std::vector<Value> &callArgs) {
   if (name == "getint") {
-    int x; inbuf >> x;
+    int x;
+    inbuf >> x;
+    if (inbuf.fail()) {
+      inbuf.clear();
+    }
     return Value { .vi = x };
   }
   if (name == "getch") {
